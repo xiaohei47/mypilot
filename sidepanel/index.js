@@ -90,6 +90,20 @@ headerNew.addEventListener('click', async () => {
 });
 
 async function startNewConversation() {
+  if (running) {
+    await chrome.runtime.sendMessage({ type: 'agent-stop' });
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 200);
+      const listener = (message) => {
+        if (message.type === 'agent-done' || message.type === 'agent-error') {
+          clearTimeout(timer);
+          chrome.runtime.onMessage.removeListener(listener);
+          resolve();
+        }
+      };
+      chrome.runtime.onMessage.addListener(listener);
+    });
+  }
   const response = await chrome.runtime.sendMessage({ type: 'history-new' });
   if (response && response.ok) {
     messages.replaceChildren();
