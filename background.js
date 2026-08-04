@@ -122,6 +122,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       void chrome.storage.local.set(settings);
       sendResponse({ ok: true });
       return false;
+    case 'page-title':
+      void (async () => {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        sendResponse({ title: tab && tab.title ? tab.title : '' });
+      })();
+      return true;
+    case 'account-balance':
+      void (async () => {
+        if (settings.provider !== 'deepseek' || !settings.apiKey) {
+          sendResponse({ ok: false, error: '当前提供商不支持余额查询' });
+          return;
+        }
+        try {
+          const response = await fetch('https://api.deepseek.com/user/balance', {
+            headers: { Authorization: `Bearer ${settings.apiKey}` }
+          });
+          if (!response.ok) {
+            sendResponse({ ok: false, error: `HTTP ${response.status}` });
+            return;
+          }
+          const data = await response.json();
+          const info = data.balance_infos && data.balance_infos[0];
+          if (!info) {
+            sendResponse({ ok: false, error: '未获取到余额信息' });
+            return;
+          }
+          sendResponse({ ok: true, currency: info.currency, balance: info.total_balance });
+        } catch (error) {
+          sendResponse({ ok: false, error: error.message });
+        }
+      })();
+      return true;
     case 'history-list':
       void (async () => {
         const { conversations = [] } = await chrome.storage.local.get('conversations');
@@ -142,6 +174,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         currentTitle = found.title;
         conversation = found.messages.slice();
         uiLog = found.log.slice();
+        totalTokens = found.tokens || 0;
+        broadcastTokens(totalTokens);
         sendResponse({ ok: true, title: found.title, log: found.log });
       })();
       return true;
@@ -217,6 +251,7 @@ async function persistConversation() {
     title: currentTitle,
     messages: conversation.slice(),
     log: uiLog.slice(),
+    tokens: totalTokens,
     updatedAt: Date.now()
   };
   const next = [entry, ...conversations.filter((c) => c.id !== currentConversationId)].slice(0, 20);
@@ -426,7 +461,7 @@ async function runAgentLoop(tabId) {
       });
     }
   }
-  notify({ type: 'agent-message', role: 'system', text: `已达到最大迭代次数（${settings.maxIterations}）` });
+  notify({ type: 'agent-message', role: 'system', text: `已达到最大操作次数（${settings.maxIterations}）` });
 }
 
 async function collectState(tabId) {

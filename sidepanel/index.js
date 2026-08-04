@@ -26,7 +26,10 @@ const menuSettings = document.body.querySelector('#menu-settings');
 const menuHistory = document.body.querySelector('#menu-history');
 const headerNew = document.body.querySelector('#header-new');
 const thinkingEl = document.body.querySelector('#thinking');
-const tokensEl = document.body.querySelector('#tokens');
+const chatTitleEl = document.body.querySelector('#chat-title');
+const tokensCurrentEl = document.body.querySelector('#tokens-current');
+const tokensKEl = document.body.querySelector('#tokens-k');
+const balanceEl = document.body.querySelector('#balance');
 
 let running = false;
 let configured = false;
@@ -355,6 +358,20 @@ function createMessage(role) {
   const body = document.createElement('div');
   el.appendChild(meta);
   el.appendChild(body);
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'message-copy';
+  copyBtn.textContent = '⧉';
+  copyBtn.title = '复制';
+  copyBtn.addEventListener('click', () => {
+    void navigator.clipboard.writeText(body.textContent).then(() => {
+      copyBtn.textContent = '✓';
+      setTimeout(() => {
+        copyBtn.textContent = '⧉';
+      }, 1200);
+    });
+  });
+  el.appendChild(copyBtn);
   messages.appendChild(el);
   return { el, body };
 }
@@ -394,6 +411,20 @@ function createReasoningBlock() {
   });
   el.appendChild(header);
   el.appendChild(body);
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'message-copy';
+  copyBtn.textContent = '⧉';
+  copyBtn.title = '复制';
+  copyBtn.addEventListener('click', () => {
+    void navigator.clipboard.writeText(body.textContent).then(() => {
+      copyBtn.textContent = '✓';
+      setTimeout(() => {
+        copyBtn.textContent = '⧉';
+      }, 1200);
+    });
+  });
+  el.appendChild(copyBtn);
   messages.appendChild(el);
   messages.scrollTop = messages.scrollHeight;
   return body;
@@ -425,7 +456,8 @@ function updateStatus() {
 }
 
 function updateTokens(tokens) {
-  tokensEl.textContent = `${(tokens / 1000).toFixed(1)}K`;
+  tokensCurrentEl.textContent = String(tokens);
+  tokensKEl.textContent = `${(tokens / 1000).toFixed(1)}K`;
 }
 
 void chrome.runtime.sendMessage({ type: 'get-settings' }).then((response) => {
@@ -439,5 +471,43 @@ void chrome.runtime.sendMessage({ type: 'get-settings' }).then((response) => {
 void chrome.runtime.sendMessage({ type: 'get-tokens' }).then((response) => {
   if (response) {
     updateTokens(response.tokens);
+  }
+});
+
+async function refreshBalance() {
+  const response = await chrome.runtime.sendMessage({ type: 'account-balance' });
+  if (response && response.ok) {
+    balanceEl.innerHTML = `剩余 <b>${response.balance}</b> ${response.currency}`;
+    balanceEl.hidden = false;
+  } else {
+    balanceEl.hidden = true;
+  }
+}
+
+void refreshBalance();
+
+void chrome.runtime.sendMessage({ type: 'history-list' }).then((response) => {
+  if (response && response.list && response.list.length) {
+    void loadHistory(response.list[0].id);
+  }
+});
+
+async function refreshPageTitle() {
+  const response = await chrome.runtime.sendMessage({ type: 'page-title' });
+  const title = response && response.title ? response.title.trim() : '';
+  if (title) {
+    chatTitleEl.textContent = title;
+    chatTitleEl.hidden = false;
+  } else {
+    chatTitleEl.hidden = true;
+  }
+}
+
+void refreshPageTitle();
+
+chrome.tabs.onActivated.addListener(() => void refreshPageTitle());
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  if (changeInfo.title) {
+    void refreshPageTitle();
   }
 });

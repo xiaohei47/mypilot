@@ -306,6 +306,38 @@ button.secondary.small {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
+.balance {
+  position: fixed;
+  left: 12px;
+  bottom: 30px;
+  font-size: 11px;
+  color: #777;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 2px 8px;
+  border-radius: 999px;
+  z-index: 10;
+  pointer-events: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+}
+
+.balance b {
+  color: #2e7d32;
+  font-weight: 600;
+}
+
+.chat-title {
+  align-self: flex-start;
+  font-size: 11px;
+  color: white;
+  background: rgba(0, 120, 255, 0.55);
+  padding: 4px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -316,6 +348,7 @@ button.secondary.small {
 }
 
 .message {
+  position: relative;
   max-width: 85%;
   padding: 10px 14px;
   border-radius: 16px;
@@ -359,6 +392,33 @@ button.secondary.small {
   font-size: 11px;
   opacity: 0.7;
   margin-bottom: 4px;
+}
+
+.message-copy {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.85);
+  border: none;
+  border-radius: 50%;
+  font-size: 13px;
+  color: #888;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.message:hover .message-copy {
+  opacity: 1;
+}
+
+.message-copy:hover {
+  background: #ddd;
+  color: #333;
 }
 
 .message.reasoning {

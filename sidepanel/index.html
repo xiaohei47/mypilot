@@ -43,7 +43,7 @@
         <input id="model" placeholder="gpt-4o-mini" list="model-list" />
         <datalist id="model-list"></datalist>
       </label>
-      <label>最大迭代次数
+      <label>最大操作次数
         <input id="max-iterations" type="number" min="1" placeholder="20" />
       </label>
       <label>页面状态字符上限
@@ -65,6 +65,7 @@
     <main id="messages" class="messages"></main>
 
     <form id="chat-form" class="chat-form">
+      <div id="chat-title" class="chat-title" hidden></div>
       <div id="thinking" class="thinking" hidden>
         <span class="spinner"></span>
         <span>Thinking…</span>
@@ -80,8 +81,8 @@
       </div>
     </form>
 
-    <div id="chat-title" class="chat-title" hidden></div>
-    <div id="tokens" class="tokens">0K</div>
+    <div id="balance" class="balance" hidden></div>
+    <div id="tokens" class="tokens"><span id="tokens-current">0</span> tokens · <span id="tokens-k">0K</span></div>
 
     <script src="index.js" type="module"></script>
   </body>
