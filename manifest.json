@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "PlayAgent",
-  "version": "0.4",
+  "name": "MyPilot",
+  "version": "0.6",
   "description": "AI Agent 驱动的浏览器自动化，基于 chrome.scripting + OpenAI 兼容 LLM，完全自包含。",
   "background": {
     "service_worker": "background.js"
@@ -18,6 +18,6 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     },
-    "default_title": "Open PlayAgent"
+    "default_title": "Open MyPilot"
   }
 }

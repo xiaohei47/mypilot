@@ -1,4 +1,4 @@
-# PlayAgent
+# MyPilot
 
 AI Agent 驱动的浏览器自动化 Chrome 扩展，完全自包含（无外部 server）。
 
@@ -8,7 +8,7 @@ AI Agent 驱动的浏览器自动化 Chrome 扩展，完全自包含（无外部
 
 ```
 ┌────────────────────────────────────────────┐
-│ Chrome Extension (PlayAgent)               │
+│ Chrome Extension (MyPilot)                  │
 │ ├─ sidepanel (Chat UI + 设置面板)          │
 │ └─ background.js (service worker)          │
 │    ├─ chrome.scripting 注入 JS 控制页面    │

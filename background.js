@@ -9,29 +9,50 @@ const MAX_STATE_CHARS = 6000;
 
 const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览器中的当前页面完成用户的任务。
 
-你可以执行以下操作，每次回复只输出一个 JSON 对象，不要输出任何其他内容：
+每次回复只输出一个 JSON 对象作为下一步操作，不要输出任何其他内容。可选操作：
 
-1. {"action":"goto","url":"https://..."} - 打开指定 URL
-2. {"action":"click","text":"可见文本"} - 点击页面上包含该文本的元素
-3. {"action":"click","selector":"CSS 选择器"} - 通过 CSS 选择器点击元素
-4. {"action":"fill","value":"内容"} - 在聚焦的元素中输入内容（通常先 click 聚焦）
-5. {"action":"fill","selector":"CSS 选择器","value":"内容"} - 在指定元素中填入内容
-6. {"action":"press","key":"Enter"} - 按键盘按键（如 Enter、Tab、Escape）
-7. {"action":"scroll","direction":"down"} - 向下滚动页面（direction 为 up 或 down）
-8. {"action":"wait","ms":1000} - 等待页面加载
-9. {"action":"ask","question":"问题"} - 当需要用户确认或任务不明确时询问用户
-10. {"action":"done","answer":"最终答案"} - 任务完成，给出最终答复
-11. {"action":"extract_table","index":0} - 提取页面上第 index 个表格的内容（index 从 0 开始，缺省为第 0 个）
-12. {"action":"save_table","index":0,"filename":"表格.csv"} - 将第 index 个表格保存为 CSV 文件并触发下载（filename 不必带 .csv）
+导航:
+1. {"action":"goto","url":"https://..."} - 打开 URL
+2. {"action":"back"} - 返回上一页
+3. {"action":"reload"} - 刷新页面
+
+鼠标:
+4. {"action":"click","text":"可见文本"} 或 {"action":"click","selector":"CSS选择器"} - 点击
+5. {"action":"dblclick","text":"..."} 或 {"action":"dblclick","selector":"..."} - 双击
+6. {"action":"hover","text":"..."} 或 {"action":"hover","selector":"..."} - 悬停（展开下拉菜单等）
+
+输入:
+7. {"action":"fill","selector":"...","value":"..."} 或 {"action":"fill","value":"..."} - 在指定或聚焦元素填入文本
+8. {"action":"type","text":"..."} - 在聚焦元素逐字输入（用于需要逐字触发的输入框）
+9. {"action":"clear","selector":"..."} 或 {"action":"clear"} - 清空输入框
+10. {"action":"select","selector":"...","value":"..."} 或 {"action":"select","selector":"...","label":"..."} - 选择下拉选项
+11. {"action":"check","text":"..."} 或 {"action":"check","selector":"..."} - 勾选复选框（默认取反，可加 "checked":true/false 指定）
+12. {"action":"press","key":"Enter"} - 按键，支持组合键如 "Ctrl+A"、"Alt+Enter"
+13. {"action":"submit"} - 提交当前聚焦的表单
+
+滚动/等待:
+14. {"action":"scroll","direction":"down"} - 滚动页面（up 或 down）
+15. {"action":"scroll_to","text":"..."} 或 {"action":"scroll_to","selector":"..."} - 滚动到指定元素
+16. {"action":"wait","ms":1000} - 等待指定毫秒
+17. {"action":"wait_for","text":"..."} 或 {"action":"wait_for","selector":"..."} - 等待元素出现（默认 10 秒，可加 "timeout":毫秒）
+
+读取/导出:
+18. {"action":"extract","text":"..."} 或 {"action":"extract","selector":"..."} - 提取元素文本内容供分析
+19. {"action":"extract_table","index":0} - 提取第 index 个表格内容
+20. {"action":"save_table","index":0,"filename":"表格.csv"} - 将表格保存为 CSV 文件并触发下载
+
+其它:
+21. {"action":"ask","question":"..."} - 任务不明确时询问用户
 
 规则：
-- 根据页面可见内容选择点击目标，优先使用精确的可见文本。
+- 页面状态中包含"可交互元素"列表（输入框/按钮/下拉等），优先据此选择操作目标。
+- 点击目标优先使用精确的可见文本。
 - 一次只执行一步操作，等待下一页状态后再继续。
 - 任务模糊时使用 ask 询问用户，而不是猜测。
-- 任务完成时使用 done 返回最终答案。
-- 无法推进任务时使用 done 说明原因。
-- 当用户要求"整理/输出/导出表格文件"时：先 extract_table 查看表格内容，需要整理则在回复中组织，再用 save_table 保存为文件，最后用 done 说明。
-- 页面内容可能来自多个内嵌页面（frame 区域），注意阅读所有 frame 的内容，操作会自动在所有 frame 中查找目标。`;
+- 任务完成时，直接用自然语言输出最终答复（不要输出 JSON）。
+- 无法推进任务时，也用自然语言说明原因并结束。
+- 当用户要求"整理/输出/导出表格文件"时：先 extract_table 查看内容，再用 save_table 保存为文件，最后用自然语言总结。
+- 页面内容可能来自多个内嵌页面（frame），注意阅读所有 frame 的内容，操作会自动在所有 frame 中查找目标。`;
 
 let settings = { ...DEFAULTS };
 let conversation = [];
@@ -42,6 +63,21 @@ let currentConversationId = null;
 let currentTitle = '';
 let uiLog = [];
 let persistTimer = null;
+let totalTokens = 0;
+
+function estimateTokens(text) {
+  const s = String(text || '');
+  let tokens = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    tokens += code >= 0x2e80 ? 1 : 0.25;
+  }
+  return Math.max(1, Math.ceil(tokens));
+}
+
+function broadcastTokens(tokens) {
+  void chrome.runtime.sendMessage({ type: 'agent-tokens', tokens }).catch(() => {});
+}
 
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
@@ -84,10 +120,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true, title: found.title, log: found.log });
       })();
       return true;
+    case 'get-tokens':
+      sendResponse({ tokens: totalTokens });
+      return false;
     case 'history-new':
       currentConversationId = null;
       conversation = [];
       uiLog = [];
+      totalTokens = 0;
       sendResponse({ ok: true });
       return false;
     case 'agent-run':
@@ -198,6 +238,8 @@ async function handleRun(userText) {
     currentTitle = userText.slice(0, 20);
     conversation = [];
     uiLog = [];
+    totalTokens = 0;
+    broadcastTokens(0);
   }
   conversation.push({ role: 'user', content: userText });
   logMessage('user', userText);
@@ -235,7 +277,13 @@ async function runAgentLoop(tabId) {
     }
 
     const state = await collectState(tabId);
-    const model = await askModel(state);
+    let model;
+    notify({ type: 'agent-thinking', on: true });
+    try {
+      model = await askModel(state);
+    } finally {
+      notify({ type: 'agent-thinking', on: false });
+    }
     const text = model.content || '';
 
     if (!text.trim()) {
@@ -279,7 +327,11 @@ async function collectState(tabId) {
         if (!s || !s.text) {
           return null;
         }
-        return `--- 页面内容 (frame ${f.frameId}) ---\nURL: ${s.url}\n标题: ${s.title}\n内容:\n${s.text}`;
+        let block = `--- 页面内容 (frame ${f.frameId}) ---\nURL: ${s.url}\n标题: ${s.title}\n内容:\n${s.text}`;
+        if (s.interactive && s.interactive.length) {
+          block += `\n\n可交互元素:\n${s.interactive.join('\n')}`;
+        }
+        return block;
       })
       .filter(Boolean);
     return sections.join('\n\n');
@@ -297,9 +349,18 @@ async function askModel(state) {
 
   let fullContent = '';
   let visible = true;
+  const promptTokens = estimateTokens(JSON.stringify(messages));
+  let completionTokens = 0;
+  let lastTokenBroadcast = 0;
 
   const handleDelta = (delta) => {
     fullContent += delta;
+    completionTokens += estimateTokens(delta);
+    const now = Date.now();
+    if (now - lastTokenBroadcast > 300) {
+      lastTokenBroadcast = now;
+      broadcastTokens(totalTokens + promptTokens + completionTokens);
+    }
     const trimmed = fullContent.trimStart();
     if (trimmed.startsWith('{') || trimmed.startsWith('```')) {
       visible = false;
@@ -347,6 +408,7 @@ async function askModel(state) {
     if (!response.body) {
       const data = await response.json();
       fullContent = data.choices && data.choices[0] ? data.choices[0].message.content : '';
+      completionTokens += estimateTokens(fullContent);
     } else {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -376,6 +438,7 @@ async function askModel(state) {
           const content = data.choices && data.choices[0] ? data.choices[0].message.content : '';
           if (content) {
             fullContent = content;
+            completionTokens += estimateTokens(content);
             const trimmed = content.trimStart();
             if (!trimmed.startsWith('{') && !trimmed.startsWith('```')) {
               notify({ type: 'agent-stream', delta: content });
@@ -391,6 +454,9 @@ async function askModel(state) {
       throw error;
     }
     throw new Error(`LLM 调用失败: ${error.message}`);
+  } finally {
+    totalTokens += promptTokens + completionTokens;
+    broadcastTokens(totalTokens);
   }
 
   conversation.push({ role: 'assistant', content: fullContent });
@@ -430,16 +496,42 @@ function describeAction(action) {
   switch (action.action) {
     case 'goto':
       return `打开 ${action.url}`;
+    case 'back':
+      return `返回上一页`;
+    case 'reload':
+      return `刷新页面`;
     case 'click':
       return `点击 ${action.text || action.selector}`;
+    case 'dblclick':
+      return `双击 ${action.text || action.selector}`;
+    case 'hover':
+      return `悬停 ${action.text || action.selector}`;
+    case 'focus':
+      return `聚焦 ${action.text || action.selector}`;
+    case 'scroll_to':
+      return `滚动到 ${action.text || action.selector}`;
     case 'fill':
       return `输入 "${action.value}"` + (action.selector ? ` 到 ${action.selector}` : '');
+    case 'type':
+      return `逐字输入 "${action.text}"`;
+    case 'clear':
+      return `清空输入框`;
+    case 'select':
+      return `选择 ${action.selector} 的选项 ${action.value || action.label}`;
+    case 'check':
+      return `勾选 ${action.text || action.selector}`;
     case 'press':
       return `按 ${action.key}`;
+    case 'submit':
+      return `提交表单`;
     case 'scroll':
       return `滚动页面 ${action.direction}`;
     case 'wait':
       return `等待 ${action.ms}ms`;
+    case 'wait_for':
+      return `等待元素 ${action.text || action.selector}`;
+    case 'extract':
+      return `提取 ${action.text || action.selector}`;
     case 'ask':
       return `询问用户：${action.question}`;
     case 'done':
@@ -455,36 +547,102 @@ function describeAction(action) {
 
 async function executeAction(tabId, action) {
   try {
+    const target = action.text
+      ? { text: action.text }
+      : action.selector
+        ? { selector: action.selector }
+        : null;
+
     switch (action.action) {
       case 'goto':
         await evalInPage(tabId, gotoScript, [action.url]);
         await sleep(1500);
         return { ok: true };
 
-      case 'click': {
-        const frames = action.text
-          ? await evalInAllFrames(tabId, clickByTextScript, [action.text])
-          : await evalInAllFrames(tabId, clickBySelectorScript, [action.selector]);
+      case 'back':
+        await evalInPage(tabId, backScript, []);
+        await sleep(1200);
+        return { ok: true };
+
+      case 'reload':
+        await evalInPage(tabId, reloadScript, []);
+        await sleep(1200);
+        return { ok: true };
+
+      case 'click':
+      case 'dblclick':
+      case 'hover':
+      case 'focus':
+      case 'scroll_to': {
+        const frames = await evalInAllFrames(tabId, domOpScript, [action.action, target, null]);
         const done = frames.some((r) => r.result === true);
-        return done ? { ok: true } : { ok: false, error: '未找到可点击的元素' };
+        return done ? { ok: true } : { ok: false, error: '未找到目标元素' };
       }
 
       case 'fill':
-        if (action.selector) {
-          const selFrames = await evalInAllFrames(tabId, fillSelectorScript, [
-            action.selector,
+        if (target) {
+          const frames = await evalInAllFrames(tabId, domOpScript, [
+            'fill_selector',
+            target,
             action.value
           ]);
-          return selFrames.some((r) => r.result === true)
+          return frames.some((r) => r.result === true)
             ? { ok: true }
             : { ok: false, error: '未找到输入框' };
         }
         {
-          const focusedFrames = await evalInAllFrames(tabId, fillFocusedScript, [action.value]);
-          return focusedFrames.some((r) => r.result === true)
+          const frames = await evalInAllFrames(tabId, domOpScript, [
+            'fill_focused',
+            null,
+            action.value
+          ]);
+          return frames.some((r) => r.result === true)
             ? { ok: true }
             : { ok: false, error: '没有可输入的聚焦元素' };
         }
+
+      case 'type': {
+        const frames = await evalInAllFrames(tabId, domOpScript, ['type', null, action.text]);
+        return frames.some((r) => r.result === true)
+          ? { ok: true }
+          : { ok: false, error: '没有可输入的聚焦元素' };
+      }
+
+      case 'clear': {
+        const frames = await evalInAllFrames(tabId, domOpScript, ['clear', target, null]);
+        return frames.some((r) => r.result === true)
+          ? { ok: true }
+          : { ok: false, error: '未找到输入框' };
+      }
+
+      case 'select': {
+        const frames = await evalInAllFrames(tabId, domOpScript, [
+          'select',
+          target,
+          { value: action.value, label: action.label }
+        ]);
+        return frames.some((r) => r.result === true)
+          ? { ok: true }
+          : { ok: false, error: '未找到下拉选项' };
+      }
+
+      case 'check': {
+        const frames = await evalInAllFrames(tabId, domOpScript, [
+          'check',
+          target,
+          { checked: action.checked }
+        ]);
+        return frames.some((r) => r.result === true)
+          ? { ok: true }
+          : { ok: false, error: '未找到复选框' };
+      }
+
+      case 'submit': {
+        const frames = await evalInAllFrames(tabId, domOpScript, ['submit', target, null]);
+        return frames.some((r) => r.result === true)
+          ? { ok: true }
+          : { ok: false, error: '未找到表单' };
+      }
 
       case 'press':
         await evalInAllFrames(tabId, pressKeyScript, [action.key]);
@@ -497,6 +655,35 @@ async function executeAction(tabId, action) {
       case 'wait':
         await sleep(action.ms || 1000);
         return { ok: true };
+
+      case 'wait_for': {
+        const deadline = Date.now() + (action.timeout || 10000);
+        const probe = action.text ? [action.text, null] : [null, action.selector];
+        while (Date.now() < deadline) {
+          if (abortFlag) {
+            return { ok: true };
+          }
+          const frames = await evalInAllFrames(tabId, waitForScript, probe);
+          if (frames.some((r) => r.result === true)) {
+            return { ok: true };
+          }
+          await sleep(500);
+        }
+        return { ok: false, error: '等待目标超时' };
+      }
+
+      case 'extract': {
+        const frames = await evalInAllFrames(tabId, domOpScript, ['extract', target, null]);
+        const hit = frames.find((r) => typeof r.result === 'string' && r.result.trim());
+        const content = hit ? hit.result.trim() : '';
+        if (!content) {
+          return { ok: false, error: '未找到可提取的内容' };
+        }
+        const snippet = content.slice(0, 4000);
+        conversation.push({ role: 'user', content: `已提取的内容：\n${snippet}` });
+        notify({ type: 'agent-message', role: 'tool', text: `[已提取]\n${snippet.slice(0, 500)}` });
+        return { ok: true };
+      }
 
       case 'ask':
         notify({ type: 'agent-message', role: 'agent', text: action.question });
@@ -549,7 +736,47 @@ async function executeAction(tabId, action) {
 
 function getStateScript(limit) {
   const text = document.body && document.body.innerText ? document.body.innerText : '';
-  return { url: location.href, title: document.title, text: text.slice(0, limit) };
+  const interactive = [];
+  const seen = new Set();
+  for (const el of document.querySelectorAll(
+    'input,textarea,select,button,a,[role=button],[role=combobox],[role=textbox]'
+  )) {
+    if (!el.getClientRects || el.getClientRects().length === 0) {
+      continue;
+    }
+    let desc;
+    if (
+      el.tagName === 'BUTTON' ||
+      el.tagName === 'A' ||
+      el.getAttribute('role') === 'button' ||
+      el.getAttribute('role') === 'combobox'
+    ) {
+      desc =
+        (el.innerText || '').replace(/\s+/g, ' ').trim() || el.getAttribute('href') || '';
+    } else {
+      const type = el.getAttribute('type');
+      const ph = el.getAttribute('placeholder');
+      const name = el.getAttribute('name');
+      desc = [
+        el.tagName.toLowerCase(),
+        type ? `type=${type}` : '',
+        ph ? `placeholder="${ph}"` : '',
+        name ? `name="${name}"` : ''
+      ]
+        .filter(Boolean)
+        .join(' ');
+    }
+    if (desc && !seen.has(desc)) {
+      seen.add(desc);
+      interactive.push(desc);
+    }
+  }
+  return {
+    url: location.href,
+    title: document.title,
+    text: text.slice(0, limit),
+    interactive: interactive.slice(0, 60)
+  };
 }
 
 function gotoScript(url) {
@@ -557,73 +784,211 @@ function gotoScript(url) {
   return true;
 }
 
-function clickByTextScript(text) {
-  const targetText = String(text);
+function backScript() {
+  history.back();
+  return true;
+}
+
+function reloadScript() {
+  location.reload();
+  return true;
+}
+
+function domOpScript(kind, target, extra) {
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const visible = (el) => el.getClientRects && el.getClientRects().length > 0;
-  const all = [
-    ...document.querySelectorAll(
-      'a,button,input,textarea,[role=button],[role=link],[role=menuitem],label,span,div,li'
-    )
-  ].filter((el) => visible(el) && norm(el.innerText));
-  const exact = all.find((el) => norm(el.innerText) === norm(targetText));
-  const target = exact || all.find((el) => norm(el.innerText).includes(norm(targetText)));
-  if (!target) {
-    return false;
-  }
-  target.click();
-  return true;
-}
+  const findByText = (text) => {
+    const t = String(text);
+    const all = [
+      ...document.querySelectorAll(
+        'a,button,input,textarea,[role=button],[role=link],[role=menuitem],label,span,div,li'
+      )
+    ].filter((el) => visible(el) && norm(el.innerText));
+    const exact = all.find((el) => norm(el.innerText) === norm(t));
+    return exact || all.find((el) => norm(el.innerText).includes(norm(t))) || null;
+  };
+  const locate = () => {
+    if (!target) {
+      return null;
+    }
+    if (target.text) {
+      return findByText(target.text);
+    }
+    if (target.selector) {
+      return document.querySelector(target.selector);
+    }
+    return null;
+  };
+  const setValue = (el, value) => {
+    const proto =
+      el.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : el.tagName === 'INPUT'
+          ? window.HTMLInputElement.prototype
+          : null;
+    if (proto) {
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(value));
+    } else if (el.isContentEditable) {
+      el.textContent = String(value);
+    } else {
+      el.value = String(value);
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const isEditable = (el) =>
+    !!el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+  const mouse = (el, type) =>
+    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
 
-function clickBySelectorScript(sel) {
-  const el = document.querySelector(sel);
-  if (!el) {
-    return false;
+  switch (kind) {
+    case 'click': {
+      const el = locate();
+      if (!el) {
+        return false;
+      }
+      el.click();
+      return true;
+    }
+    case 'dblclick': {
+      const el = locate();
+      if (!el) {
+        return false;
+      }
+      mouse(el, 'dblclick');
+      return true;
+    }
+    case 'hover': {
+      const el = locate();
+      if (!el) {
+        return false;
+      }
+      for (const t of ['pointerover', 'mouseover', 'mouseenter', 'mousemove']) {
+        mouse(el, t);
+      }
+      return true;
+    }
+    case 'focus': {
+      const el = locate();
+      if (!el) {
+        return false;
+      }
+      el.focus();
+      return true;
+    }
+    case 'scroll_to': {
+      const el = locate();
+      if (!el) {
+        return false;
+      }
+      el.scrollIntoView({ block: 'center' });
+      return true;
+    }
+    case 'fill_selector': {
+      const el = locate();
+      if (!el) {
+        return false;
+      }
+      if (el.focus) {
+        el.focus();
+      }
+      setValue(el, extra);
+      return true;
+    }
+    case 'fill_focused': {
+      if (!document.hasFocus() || !isEditable(document.activeElement)) {
+        return false;
+      }
+      setValue(document.activeElement, extra);
+      return true;
+    }
+    case 'type': {
+      if (!document.hasFocus() || !isEditable(document.activeElement)) {
+        return false;
+      }
+      const el = document.activeElement;
+      const value = String(extra);
+      const proto =
+        el.tagName === 'TEXTAREA'
+          ? window.HTMLTextAreaElement.prototype
+          : el.tagName === 'INPUT'
+            ? window.HTMLInputElement.prototype
+            : null;
+      for (let i = 0; i < value.length; i++) {
+        if (proto) {
+          Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value.slice(0, i + 1));
+        } else {
+          el.textContent = value.slice(0, i + 1);
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+    case 'clear': {
+      const el = target ? locate() : document.activeElement;
+      if (!el || (target && !isEditable(el))) {
+        return false;
+      }
+      setValue(el, '');
+      return true;
+    }
+    case 'select': {
+      const el = locate();
+      if (!el || el.tagName !== 'SELECT') {
+        return false;
+      }
+      if (extra && extra.value != null) {
+        el.value = String(extra.value);
+      } else if (extra && extra.label) {
+        const opt = [...el.options].find((o) => norm(o.text) === norm(extra.label));
+        if (!opt) {
+          return false;
+        }
+        el.value = opt.value;
+      } else {
+        return false;
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+    case 'check': {
+      const el = locate();
+      if (!el || el.tagName !== 'INPUT' || (el.type !== 'checkbox' && el.type !== 'radio')) {
+        return false;
+      }
+      const checked = extra && extra.checked != null ? Boolean(extra.checked) : !el.checked;
+      el.checked = checked;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      mouse(el, 'click');
+      return true;
+    }
+    case 'submit': {
+      const el = target ? locate() : document.activeElement;
+      const form = el && (el.tagName === 'FORM' ? el : el.closest ? el.closest('form') : null);
+      if (!form) {
+        return false;
+      }
+      if (form.requestSubmit) {
+        form.requestSubmit();
+      } else {
+        form.submit();
+      }
+      return true;
+    }
+    case 'extract': {
+      if (target) {
+        const el = locate();
+        if (!el) {
+          return '';
+        }
+        return norm(el.innerText || el.textContent);
+      }
+      const text = document.body ? document.body.innerText || document.body.textContent || '' : '';
+      return text.slice(0, 4000);
+    }
   }
-  el.click();
-  return true;
-}
-
-function setInputValue(el, value) {
-  const proto =
-    el.tagName === 'TEXTAREA'
-      ? window.HTMLTextAreaElement.prototype
-      : el.tagName === 'INPUT'
-        ? window.HTMLInputElement.prototype
-        : null;
-  if (proto) {
-    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(value));
-  } else if (el.isContentEditable) {
-    el.textContent = String(value);
-  } else {
-    el.value = String(value);
-  }
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-function fillSelectorScript(sel, value) {
-  const el = document.querySelector(sel);
-  if (!el) {
-    return false;
-  }
-  if (el.focus) {
-    el.focus();
-  }
-  setInputValue(el, value);
-  return true;
-}
-
-function fillFocusedScript(value) {
-  if (!document.hasFocus()) {
-    return false;
-  }
-  const el = document.activeElement;
-  if (!el || (!el.isContentEditable && el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) {
-    return false;
-  }
-  setInputValue(el, value);
-  return true;
+  return false;
 }
 
 function pressKeyScript(key) {
@@ -643,26 +1008,60 @@ function pressKeyScript(key) {
     Home: 36,
     End: 35,
     PageUp: 33,
-    PageDown: 34
+    PageDown: 34,
+    ' ': 32
   };
-  const code = keyCodes[key];
-  const target = document.activeElement || document.body;
-  if (code) {
-    const init = {
-      key,
-      code,
-      keyCode: code,
-      which: code,
-      bubbles: true,
-      cancelable: true
-    };
-    target.dispatchEvent(new KeyboardEvent('keydown', init));
-    target.dispatchEvent(new KeyboardEvent('keyup', init));
-    if (key === 'Enter' && target.form && target.form.requestSubmit) {
-      target.form.requestSubmit();
+  const parts = String(key)
+    .split('+')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const keyName = parts[parts.length - 1];
+  const modifiers = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
+  for (const p of parts.slice(0, -1)) {
+    if (/^(ctrl|control)$/i.test(p)) {
+      modifiers.ctrlKey = true;
+    } else if (/^alt$/i.test(p)) {
+      modifiers.altKey = true;
+    } else if (/^shift$/i.test(p)) {
+      modifiers.shiftKey = true;
+    } else if (/^(meta|win|command)$/i.test(p)) {
+      modifiers.metaKey = true;
     }
   }
+  const target = document.activeElement || document.body;
+  const code = keyCodes[keyName] || keyName.charCodeAt(0);
+  const init = {
+    key: keyName,
+    code: keyName,
+    keyCode: code,
+    which: code,
+    bubbles: true,
+    cancelable: true,
+    ...modifiers
+  };
+  target.dispatchEvent(new KeyboardEvent('keydown', init));
+  target.dispatchEvent(new KeyboardEvent('keyup', init));
+  if (
+    keyName === 'Enter' &&
+    !modifiers.ctrlKey &&
+    !modifiers.altKey &&
+    target.form &&
+    target.form.requestSubmit
+  ) {
+    target.form.requestSubmit();
+  }
   return true;
+}
+
+function waitForScript(text, selector) {
+  if (selector) {
+    return !!document.querySelector(selector);
+  }
+  const t = String(text);
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  return !![...document.querySelectorAll('a,button,input,textarea,span,div,li,[role=button]')].find(
+    (el) => el.getClientRects && el.getClientRects().length > 0 && norm(el.innerText).includes(norm(t))
+  );
 }
 
 function scrollScript(direction) {

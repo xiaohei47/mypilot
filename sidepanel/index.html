@@ -6,11 +6,15 @@
   </head>
   <body>
     <header class="header">
-      <h1>PlayAgent</h1>
       <div class="header-right">
-        <button id="history-toggle" class="icon-btn" title="历史对话">🕘</button>
-        <button id="settings-toggle" class="icon-btn" title="设置">⚙</button>
         <div id="status" class="status">未配置</div>
+        <div id="menu-wrap" class="menu-wrap">
+          <button id="menu-toggle" class="icon-btn" title="菜单">⋮</button>
+          <div id="menu" class="menu" hidden>
+            <button id="menu-settings" class="menu-item">设置</button>
+            <button id="menu-history" class="menu-item">历史对话</button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -41,9 +45,13 @@
     <main id="messages" class="messages"></main>
 
     <form id="chat-form" class="chat-form">
+      <div id="thinking" class="thinking" hidden>
+        <span class="spinner"></span>
+        <span>Thinking…</span>
+      </div>
       <textarea
         id="input"
-        placeholder="描述任务，例如：在当前页面搜索「playwright」并返回第一条结果标题"
+        placeholder="输入内容"
         rows="3"
       ></textarea>
       <div class="chat-actions">
@@ -51,6 +59,8 @@
         <button id="stop" type="button" class="secondary" hidden>停止</button>
       </div>
     </form>
+
+    <div id="tokens" class="tokens">0K</div>
 
     <script src="index.js" type="module"></script>
   </body>

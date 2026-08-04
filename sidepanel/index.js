@@ -5,16 +5,21 @@ const sendButton = document.body.querySelector('#send');
 const stopButton = document.body.querySelector('#stop');
 const statusEl = document.body.querySelector('#status');
 const settingsPanel = document.body.querySelector('#settings');
-const settingsToggle = document.body.querySelector('#settings-toggle');
 const settingsSave = document.body.querySelector('#settings-save');
 const settingsMsg = document.body.querySelector('#settings-msg');
 const apiKeyInput = document.body.querySelector('#api-key');
 const baseUrlInput = document.body.querySelector('#base-url');
 const modelInput = document.body.querySelector('#model');
-const historyToggle = document.body.querySelector('#history-toggle');
 const historyPanel = document.body.querySelector('#history');
 const historyListEl = document.body.querySelector('#history-list');
 const historyNew = document.body.querySelector('#history-new');
+const menuWrap = document.body.querySelector('#menu-wrap');
+const menuToggle = document.body.querySelector('#menu-toggle');
+const menu = document.body.querySelector('#menu');
+const menuSettings = document.body.querySelector('#menu-settings');
+const menuHistory = document.body.querySelector('#menu-history');
+const thinkingEl = document.body.querySelector('#thinking');
+const tokensEl = document.body.querySelector('#tokens');
 
 let running = false;
 let configured = false;
@@ -31,11 +36,26 @@ input.addEventListener('keydown', (event) => {
   }
 });
 
-settingsToggle.addEventListener('click', () => {
+menuToggle.addEventListener('click', (event) => {
+  event.stopPropagation();
+  menu.hidden = !menu.hidden;
+});
+
+document.addEventListener('pointerdown', (event) => {
+  if (!menuWrap.contains(event.target)) {
+    menu.hidden = true;
+  }
+});
+
+menuSettings.addEventListener('click', () => {
+  menu.hidden = true;
+  historyPanel.hidden = true;
   settingsPanel.hidden = !settingsPanel.hidden;
 });
 
-historyToggle.addEventListener('click', async () => {
+menuHistory.addEventListener('click', async () => {
+  menu.hidden = true;
+  settingsPanel.hidden = true;
   historyPanel.hidden = !historyPanel.hidden;
   if (!historyPanel.hidden) {
     await refreshHistory();
@@ -115,8 +135,7 @@ chatForm.addEventListener('submit', async (event) => {
   streamBody = null;
   running = true;
   stopButton.hidden = false;
-  updateStatus();
-  try {
+  updateStatus();  try {
     const response = await chrome.runtime.sendMessage({ type: 'agent-run', text });
     if (!response || !response.ok) {
       addMessage('system', `错误：${response ? response.error : '无法连接到 service worker'}`);
@@ -146,7 +165,14 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'download-csv':
       downloadFile(message.filename, message.csv);
       break;
+    case 'agent-thinking':
+      thinkingEl.hidden = !message.on;
+      break;
+    case 'agent-tokens':
+      updateTokens(message.tokens);
+      break;
     case 'agent-done':
+      thinkingEl.hidden = true;
       streamBody = null;
       running = false;
       stopButton.hidden = true;
@@ -154,6 +180,7 @@ chrome.runtime.onMessage.addListener((message) => {
       updateStatus();
       break;
     case 'agent-error':
+      thinkingEl.hidden = true;
       addMessage('system', `错误：${message.text}`);
       streamBody = null;
       running = false;
@@ -208,6 +235,10 @@ function updateStatus() {
   }
 }
 
+function updateTokens(tokens) {
+  tokensEl.textContent = `${(tokens / 1000).toFixed(1)}K`;
+}
+
 void chrome.runtime.sendMessage({ type: 'get-settings' }).then((response) => {
   if (response && response.settings) {
     apiKeyInput.value = response.settings.apiKey || '';
@@ -215,5 +246,11 @@ void chrome.runtime.sendMessage({ type: 'get-settings' }).then((response) => {
     modelInput.value = response.settings.model || '';
     configured = Boolean(response.settings.apiKey);
     updateStatus();
+  }
+});
+
+void chrome.runtime.sendMessage({ type: 'get-tokens' }).then((response) => {
+  if (response) {
+    updateTokens(response.tokens);
   }
 });
