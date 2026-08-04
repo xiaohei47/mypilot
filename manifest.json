@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "PlayAgent",
-  "version": "0.1",
-  "description": "AI Agent 驱动的浏览器自动化，基于 Playwright + OpenAI 兼容 LLM。",
+  "version": "0.4",
+  "description": "AI Agent 驱动的浏览器自动化，基于 chrome.scripting + OpenAI 兼容 LLM，完全自包含。",
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["sidePanel"],
+  "permissions": ["sidePanel", "scripting", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "side_panel": {
     "default_path": "sidepanel/index.html"
   },

@@ -32,6 +32,21 @@ select {
   font-size: 16px;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 16px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
 .status {
   font-size: 12px;
   padding: 3px 10px;
@@ -39,12 +54,113 @@ select {
   background: #666;
 }
 
-.status.connected {
+.status.ready {
   background: #2e7d32;
 }
 
-.status.error {
+.status.running {
+  background: #1976d2;
+}
+
+.status.missing {
   background: #c62828;
+}
+
+.settings {
+  padding: 12px 16px;
+  background: white;
+  border-bottom: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #666;
+}
+
+.settings input {
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+}
+
+.settings input:focus {
+  border-color: #1976d2;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-msg {
+  font-size: 12px;
+  color: #2e7d32;
+}
+
+.history {
+  padding: 12px 16px;
+  background: white;
+  border-bottom: 1px solid #ddd;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-item {
+  text-align: left;
+  background: #f5f5f5;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.history-item:hover {
+  background: #e8e8e8;
+}
+
+.history-title {
+  font-size: 13px;
+  color: #1f1f1f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-time {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+}
+
+button.secondary.small {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: #eee;
 }
 
 .messages {

@@ -4,11 +4,103 @@ const input = document.body.querySelector('#input');
 const sendButton = document.body.querySelector('#send');
 const stopButton = document.body.querySelector('#stop');
 const statusEl = document.body.querySelector('#status');
+const settingsPanel = document.body.querySelector('#settings');
+const settingsToggle = document.body.querySelector('#settings-toggle');
+const settingsSave = document.body.querySelector('#settings-save');
+const settingsMsg = document.body.querySelector('#settings-msg');
+const apiKeyInput = document.body.querySelector('#api-key');
+const baseUrlInput = document.body.querySelector('#base-url');
+const modelInput = document.body.querySelector('#model');
+const historyToggle = document.body.querySelector('#history-toggle');
+const historyPanel = document.body.querySelector('#history');
+const historyListEl = document.body.querySelector('#history-list');
+const historyNew = document.body.querySelector('#history-new');
 
 let running = false;
+let configured = false;
+let streamBody = null;
 
 input.addEventListener('input', () => {
   sendButton.disabled = !input.value.trim();
+});
+
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    chatForm.requestSubmit();
+  }
+});
+
+settingsToggle.addEventListener('click', () => {
+  settingsPanel.hidden = !settingsPanel.hidden;
+});
+
+historyToggle.addEventListener('click', async () => {
+  historyPanel.hidden = !historyPanel.hidden;
+  if (!historyPanel.hidden) {
+    await refreshHistory();
+  }
+});
+
+historyNew.addEventListener('click', async () => {
+  const response = await chrome.runtime.sendMessage({ type: 'history-new' });
+  if (response && response.ok) {
+    messages.replaceChildren();
+    streamBody = null;
+    historyPanel.hidden = true;
+  }
+});
+
+async function refreshHistory() {
+  const response = await chrome.runtime.sendMessage({ type: 'history-list' });
+  if (!response || !response.list) {
+    return;
+  }
+  historyListEl.replaceChildren();
+  for (const c of response.list) {
+    const item = document.createElement('button');
+    item.className = 'history-item';
+    const title = document.createElement('div');
+    title.className = 'history-title';
+    title.textContent = c.title || '(无标题)';
+    const time = document.createElement('div');
+    time.className = 'history-time';
+    time.textContent = new Date(c.updatedAt).toLocaleString();
+    item.appendChild(title);
+    item.appendChild(time);
+    item.addEventListener('click', () => void loadHistory(c.id));
+    historyListEl.appendChild(item);
+  }
+}
+
+async function loadHistory(id) {
+  const response = await chrome.runtime.sendMessage({ type: 'history-load', id });
+  if (!response || !response.ok) {
+    return;
+  }
+  messages.replaceChildren();
+  streamBody = null;
+  for (const m of response.log) {
+    addMessage(m.role, m.text);
+  }
+  historyPanel.hidden = true;
+}
+
+settingsSave.addEventListener('click', async () => {
+  const settings = {
+    apiKey: apiKeyInput.value.trim(),
+    baseUrl: baseUrlInput.value.trim(),
+    model: modelInput.value.trim()
+  };
+  const response = await chrome.runtime.sendMessage({ type: 'save-settings', settings });
+  if (response && response.ok) {
+    configured = Boolean(settings.apiKey);
+    settingsMsg.textContent = '已保存';
+  } else {
+    settingsMsg.textContent = '保存失败';
+  }
+  settingsMsg.hidden = false;
+  updateStatus();
 });
 
 chatForm.addEventListener('submit', async (event) => {
@@ -20,8 +112,10 @@ chatForm.addEventListener('submit', async (event) => {
   input.value = '';
   sendButton.disabled = true;
   addMessage('user', text);
+  streamBody = null;
   running = true;
   stopButton.hidden = false;
+  updateStatus();
   try {
     const response = await chrome.runtime.sendMessage({ type: 'agent-run', text });
     if (!response || !response.ok) {
@@ -33,52 +127,93 @@ chatForm.addEventListener('submit', async (event) => {
 });
 
 stopButton.addEventListener('click', () => {
+  addMessage('system', '正在停止…');
   void chrome.runtime.sendMessage({ type: 'agent-stop' });
 });
 
 chrome.runtime.onMessage.addListener((message) => {
   switch (message.type) {
-    case 'connection-status':
-      updateStatus(message.connected);
-      break;
     case 'agent-message':
       addMessage(message.role, message.text);
       break;
+    case 'agent-stream':
+      if (!streamBody) {
+        streamBody = createMessage('agent').body;
+      }
+      streamBody.textContent += message.delta;
+      messages.scrollTop = messages.scrollHeight;
+      break;
+    case 'download-csv':
+      downloadFile(message.filename, message.csv);
+      break;
     case 'agent-done':
+      streamBody = null;
       running = false;
       stopButton.hidden = true;
       sendButton.disabled = !input.value.trim();
+      updateStatus();
       break;
     case 'agent-error':
       addMessage('system', `错误：${message.text}`);
+      streamBody = null;
       running = false;
       stopButton.hidden = true;
       sendButton.disabled = !input.value.trim();
+      updateStatus();
       break;
   }
 });
 
-function addMessage(role, text) {
+function createMessage(role) {
   const el = document.createElement('div');
   el.className = `message ${role}`;
   const meta = document.createElement('div');
   meta.className = 'meta';
   meta.textContent = new Date().toLocaleTimeString();
   const body = document.createElement('div');
-  body.textContent = text;
   el.appendChild(meta);
   el.appendChild(body);
   messages.appendChild(el);
+  return { el, body };
+}
+
+function addMessage(role, text) {
+  const { body } = createMessage(role);
+  body.textContent = text;
   messages.scrollTop = messages.scrollHeight;
 }
 
-function updateStatus(connected) {
-  statusEl.textContent = connected ? '已连接' : '未连接';
-  statusEl.className = `status ${connected ? 'connected' : ''}`;
+function downloadFile(filename, content) {
+  const blob = new Blob(['\ufeff' + content], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-void chrome.runtime.sendMessage({ type: 'connection-status' }).then((response) => {
-  if (response) {
-    updateStatus(response.connected);
+function updateStatus() {
+  if (running) {
+    statusEl.textContent = '运行中';
+    statusEl.className = 'status running';
+  } else if (configured) {
+    statusEl.textContent = '已就绪';
+    statusEl.className = 'status ready';
+  } else {
+    statusEl.textContent = '未配置';
+    statusEl.className = 'status missing';
+  }
+}
+
+void chrome.runtime.sendMessage({ type: 'get-settings' }).then((response) => {
+  if (response && response.settings) {
+    apiKeyInput.value = response.settings.apiKey || '';
+    baseUrlInput.value = response.settings.baseUrl || '';
+    modelInput.value = response.settings.model || '';
+    configured = Boolean(response.settings.apiKey);
+    updateStatus();
   }
 });

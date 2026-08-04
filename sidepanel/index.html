@@ -7,15 +7,43 @@
   <body>
     <header class="header">
       <h1>PlayAgent</h1>
-      <div id="status" class="status">未连接</div>
+      <div class="header-right">
+        <button id="history-toggle" class="icon-btn" title="历史对话">🕘</button>
+        <button id="settings-toggle" class="icon-btn" title="设置">⚙</button>
+        <div id="status" class="status">未配置</div>
+      </div>
     </header>
+
+    <section id="history" class="history" hidden>
+      <div class="history-head">
+        <span>历史对话</span>
+        <button id="history-new" class="secondary small">新对话</button>
+      </div>
+      <div id="history-list" class="history-list"></div>
+    </section>
+
+    <section id="settings" class="settings" hidden>
+      <label>API Key
+        <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" />
+      </label>
+      <label>Base URL
+        <input id="base-url" placeholder="https://api.openai.com/v1" />
+      </label>
+      <label>Model
+        <input id="model" placeholder="gpt-4o-mini" />
+      </label>
+      <div class="settings-actions">
+        <button id="settings-save" class="primary">保存</button>
+        <div id="settings-msg" class="settings-msg" hidden></div>
+      </div>
+    </section>
 
     <main id="messages" class="messages"></main>
 
     <form id="chat-form" class="chat-form">
       <textarea
         id="input"
-        placeholder="描述任务，例如：打开百度搜索「playwright」，返回第一条结果标题"
+        placeholder="描述任务，例如：在当前页面搜索「playwright」并返回第一条结果标题"
         rows="3"
       ></textarea>
       <div class="chat-actions">
