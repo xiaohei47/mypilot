@@ -4,7 +4,7 @@ const DEFAULTS = {
   model: 'gpt-4o-mini'
 };
 
-const MAX_ITERATIONS = 15;
+const MAX_ITERATIONS = 20;
 const MAX_STATE_CHARS = 6000;
 
 const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览器中的当前页面完成用户的任务。
@@ -52,7 +52,14 @@ const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览
 - 任务完成时，直接用自然语言输出最终答复（不要输出 JSON）。
 - 无法推进任务时，也用自然语言说明原因并结束。
 - 当用户要求"整理/输出/导出表格文件"时：先 extract_table 查看内容，再用 save_table 保存为文件，最后用自然语言总结。
-- 页面内容可能来自多个内嵌页面（frame），注意阅读所有 frame 的内容，操作会自动在所有 frame 中查找目标。`;
+- 页面内容可能来自多个内嵌页面（frame），注意阅读所有 frame 的内容，操作会自动在所有 frame 中查找目标。
+
+任务纪律（非常重要）：
+- 每次执行动作后，系统会用 <tool_result name="动作名" status="success|error|skipped">结果</tool_result> 反馈给你。看到 status="success" 就表示该动作已经成功完成，不要重复执行。
+- 点击"查询/搜索/确定/提交"后，等待结果出现，立即读取结果并给出最终答复，不要继续点击其他按钮。
+- 除非用户明确要求，不要点击"返回/后退/重置/取消/退出"类按钮，这类按钮会撤销进度。
+- 同样内容的操作执行过一次后不要再执行；一旦开始重复操作，说明很可能已经完成，直接给出最终答复。
+- 每一步操作都必须让任务更接近完成；想不出该做什么时，直接基于已有信息给出最终答复。`;
 
 let settings = { ...DEFAULTS };
 let conversation = [];
@@ -118,6 +125,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         conversation = found.messages.slice();
         uiLog = found.log.slice();
         sendResponse({ ok: true, title: found.title, log: found.log });
+      })();
+      return true;
+    case 'history-export':
+      void (async () => {
+        const { conversations = [] } = await chrome.storage.local.get('conversations');
+        const found = conversations.find((c) => c.id === message.id);
+        if (!found) {
+          sendResponse({ ok: false, error: '对话不存在' });
+          return;
+        }
+        sendResponse({ ok: true, title: found.title, updatedAt: found.updatedAt, log: found.log });
       })();
       return true;
     case 'get-tokens':
@@ -270,6 +288,13 @@ async function handleRun(userText) {
 }
 
 async function runAgentLoop(tabId) {
+  let lastActionKey = null;
+  let lastActionOk = false;
+  let repeatCount = 0;
+  let cycleKey1 = null;
+  let cycleKey2 = null;
+  let cycleCount = 0;
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (abortFlag) {
       notify({ type: 'agent-message', role: 'system', text: '已停止' });
@@ -280,7 +305,7 @@ async function runAgentLoop(tabId) {
     let model;
     notify({ type: 'agent-thinking', on: true });
     try {
-      model = await askModel(state);
+      model = await askModel(state, i === MAX_ITERATIONS - 1);
     } finally {
       notify({ type: 'agent-thinking', on: false });
     }
@@ -307,12 +332,71 @@ async function runAgentLoop(tabId) {
       return;
     }
 
+    if (i === MAX_ITERATIONS - 1) {
+      notify({ type: 'agent-message', role: 'system', text: '已达最后一步，结束任务。' });
+      return;
+    }
+
+    const actionKey = JSON.stringify(action);
+    if (actionKey === lastActionKey && lastActionOk) {
+      repeatCount++;
+      if (repeatCount >= 3) {
+        notify({
+          type: 'agent-message',
+          role: 'system',
+          text: `动作「${describeAction(action)}」被多次重复，可能已生效但模型未感知，已停止。`
+        });
+        return;
+      }
+      conversation.push({
+        role: 'user',
+        content: `<tool_result name="${action.action}" status="skipped">动作「${describeAction(action)}」上次已执行成功，请勿重复。</tool_result>`
+      });
+      notify({
+        type: 'agent-message',
+        role: 'system',
+        text: `跳过重复动作（${describeAction(action)}），已提醒模型换一种方式继续。`
+      });
+      continue;
+    }
+
+    if (actionKey === cycleKey2 && cycleKey1 !== null && actionKey !== cycleKey1) {
+      cycleCount++;
+      if (cycleCount >= 2) {
+        notify({
+          type: 'agent-message',
+          role: 'system',
+          text: `检测到循环操作（${describeAction(action)} 与之前的动作反复交替），已停止。`
+        });
+        return;
+      }
+    } else {
+      cycleCount = 0;
+    }
+    cycleKey2 = cycleKey1;
+    cycleKey1 = actionKey;
+
     notify({ type: 'agent-message', role: 'tool', text: `[动作] ${describeAction(action)}` });
     const result = await executeAction(tabId, action);
     if (!result.ok) {
+      lastActionKey = null;
+      lastActionOk = false;
+      repeatCount = 0;
+      conversation.push({
+        role: 'user',
+        content: `<tool_result name="${action.action}" status="error">${result.error}</tool_result>`
+      });
       notify({ type: 'agent-message', role: 'system', text: `执行失败：${result.error}` });
     } else if (result.stop) {
       return;
+    } else {
+      lastActionKey = actionKey;
+      lastActionOk = true;
+      repeatCount = 0;
+      conversation.push({
+        role: 'user',
+        content: `<tool_result name="${action.action}" status="success">${describeAction(action)}</tool_result>`
+      });
     }
   }
   notify({ type: 'agent-message', role: 'system', text: `已达到最大迭代次数（${MAX_ITERATIONS}）` });
@@ -340,11 +424,17 @@ async function collectState(tabId) {
   }
 }
 
-async function askModel(state) {
+async function askModel(state, lastStep) {
+  if (conversation.length > 40) {
+    conversation = conversation.slice(-40);
+  }
+  const statePrompt = lastStep
+    ? `--- 页面状态 ---\n${state}\n\n这是最后一步：不要再执行任何动作，请直接基于已有信息给出最终答复。`
+    : `--- 页面状态 ---\n${state}\n\n请根据页面状态决定下一步操作。`;
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     ...conversation,
-    { role: 'user', content: `--- 页面状态 ---\n${state}\n\n请根据页面状态决定下一步操作。` }
+    { role: 'user', content: statePrompt }
   ];
 
   let fullContent = '';
@@ -393,17 +483,42 @@ async function askModel(state) {
   };
 
   try {
-    const response = await fetch(`${settings.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${settings.apiKey}`
-      },
-      body: JSON.stringify({ model: settings.model, messages, temperature: 0.1, stream: true }),
-      signal: abortController.signal
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+    const url = `${settings.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+    let response = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (abortFlag) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${settings.apiKey}`
+          },
+          body: JSON.stringify({ model: settings.model, messages, temperature: 0.1, stream: true }),
+          signal: abortController.signal
+        });
+        if (response.ok) {
+          break;
+        }
+        if (response.status === 429 || response.status >= 500) {
+          if (attempt === 2) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          await sleep(1500 * (attempt + 1));
+          continue;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          throw error;
+        }
+        if (attempt === 2) {
+          throw error;
+        }
+        await sleep(1500 * (attempt + 1));
+      }
     }
     if (!response.body) {
       const data = await response.json();
@@ -576,7 +691,13 @@ async function executeAction(tabId, action) {
       case 'scroll_to': {
         const frames = await evalInAllFrames(tabId, domOpScript, [action.action, target, null]);
         const done = frames.some((r) => r.result === true);
-        return done ? { ok: true } : { ok: false, error: '未找到目标元素' };
+        if (!done) {
+          return { ok: false, error: '未找到目标元素' };
+        }
+        if (action.action === 'click' || action.action === 'dblclick') {
+          await sleep(600);
+        }
+        return { ok: true };
       }
 
       case 'fill':
@@ -639,13 +760,17 @@ async function executeAction(tabId, action) {
 
       case 'submit': {
         const frames = await evalInAllFrames(tabId, domOpScript, ['submit', target, null]);
-        return frames.some((r) => r.result === true)
-          ? { ok: true }
-          : { ok: false, error: '未找到表单' };
+        const done = frames.some((r) => r.result === true);
+        if (!done) {
+          return { ok: false, error: '未找到表单' };
+        }
+        await sleep(800);
+        return { ok: true };
       }
 
       case 'press':
         await evalInAllFrames(tabId, pressKeyScript, [action.key]);
+        await sleep(400);
         return { ok: true };
 
       case 'scroll':
@@ -680,7 +805,7 @@ async function executeAction(tabId, action) {
           return { ok: false, error: '未找到可提取的内容' };
         }
         const snippet = content.slice(0, 4000);
-        conversation.push({ role: 'user', content: `已提取的内容：\n${snippet}` });
+        conversation.push({ role: 'user', content: `<tool_result name="extract" status="success">${snippet}</tool_result>` });
         notify({ type: 'agent-message', role: 'tool', text: `[已提取]\n${snippet.slice(0, 500)}` });
         return { ok: true };
       }
@@ -707,7 +832,7 @@ async function executeAction(tabId, action) {
           .join('\n');
         const summary = `页面共有 ${data.tableCount} 个表格，第 ${action.index ?? 0} 个表格共 ${data.rows.length} 行。\n表格内容：\n${preview}`;
         notify({ type: 'agent-message', role: 'tool', text: `[表格内容]\n${summary}` });
-        conversation.push({ role: 'user', content: `已提取表格内容：\n${summary}` });
+        conversation.push({ role: 'user', content: `<tool_result name="extract_table" status="success">${summary}</tool_result>` });
         return { ok: true };
       }
 
@@ -720,7 +845,7 @@ async function executeAction(tabId, action) {
         }
         const filename = (action.filename || 'table.csv').replace(/\.csv$/i, '') + '.csv';
         const csv = toCsv(data.rows);
-        conversation.push({ role: 'user', content: `已保存表格为文件：${filename}` });
+        conversation.push({ role: 'user', content: `<tool_result name="save_table" status="success">已保存文件 ${filename}</tool_result>` });
         notify({ type: 'download-csv', filename, csv });
         notify({ type: 'agent-message', role: 'tool', text: `已生成文件：${filename}` });
         return { ok: true };

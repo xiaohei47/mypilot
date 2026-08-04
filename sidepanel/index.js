@@ -6,6 +6,7 @@ const stopButton = document.body.querySelector('#stop');
 const statusEl = document.body.querySelector('#status');
 const settingsPanel = document.body.querySelector('#settings');
 const settingsSave = document.body.querySelector('#settings-save');
+const settingsCancel = document.body.querySelector('#settings-cancel');
 const settingsMsg = document.body.querySelector('#settings-msg');
 const apiKeyInput = document.body.querySelector('#api-key');
 const baseUrlInput = document.body.querySelector('#base-url');
@@ -42,8 +43,15 @@ menuToggle.addEventListener('click', (event) => {
 });
 
 document.addEventListener('pointerdown', (event) => {
-  if (!menuWrap.contains(event.target)) {
+  const insideMenu = menuWrap.contains(event.target);
+  if (!insideMenu) {
     menu.hidden = true;
+  }
+  if (!insideMenu && !settingsPanel.contains(event.target)) {
+    settingsPanel.hidden = true;
+  }
+  if (!insideMenu && !historyPanel.contains(event.target)) {
+    historyPanel.hidden = true;
   }
 });
 
@@ -78,19 +86,49 @@ async function refreshHistory() {
   }
   historyListEl.replaceChildren();
   for (const c of response.list) {
-    const item = document.createElement('button');
+    const item = document.createElement('div');
     item.className = 'history-item';
+    const info = document.createElement('div');
+    info.className = 'history-info';
     const title = document.createElement('div');
     title.className = 'history-title';
     title.textContent = c.title || '(无标题)';
     const time = document.createElement('div');
     time.className = 'history-time';
     time.textContent = new Date(c.updatedAt).toLocaleString();
-    item.appendChild(title);
-    item.appendChild(time);
+    info.appendChild(title);
+    info.appendChild(time);
+    const exportBtn = document.createElement('button');
+    exportBtn.className = 'history-export';
+    exportBtn.textContent = '导出';
+    exportBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void exportHistory(c.id);
+    });
+    item.appendChild(info);
+    item.appendChild(exportBtn);
     item.addEventListener('click', () => void loadHistory(c.id));
     historyListEl.appendChild(item);
   }
+}
+
+async function exportHistory(id) {
+  const response = await chrome.runtime.sendMessage({ type: 'history-export', id });
+  if (!response || !response.ok) {
+    addMessage('system', `导出失败：${response ? response.error : '未知错误'}`);
+    return;
+  }
+  const filename = `mypilot-${new Date(response.updatedAt).toISOString().slice(0, 10)}.md`;
+  downloadFile(filename, buildMarkdown(response.title, response.updatedAt, response.log));
+}
+
+function buildMarkdown(title, updatedAt, log) {
+  const roleNames = { user: '用户', agent: 'Agent', tool: '操作', system: '系统' };
+  const lines = [`# ${title || 'MyPilot 对话'}`, '', `时间：${new Date(updatedAt).toLocaleString()}`, '', '---', ''];
+  for (const m of log) {
+    lines.push(`**${roleNames[m.role] || m.role}**`, '', m.text, '', '---', '');
+  }
+  return lines.join('\n');
 }
 
 async function loadHistory(id) {
@@ -121,6 +159,17 @@ settingsSave.addEventListener('click', async () => {
   }
   settingsMsg.hidden = false;
   updateStatus();
+});
+
+settingsCancel.addEventListener('click', async () => {
+  const response = await chrome.runtime.sendMessage({ type: 'get-settings' });
+  if (response && response.settings) {
+    apiKeyInput.value = response.settings.apiKey || '';
+    baseUrlInput.value = response.settings.baseUrl || '';
+    modelInput.value = response.settings.model || '';
+  }
+  settingsMsg.hidden = true;
+  settingsPanel.hidden = true;
 });
 
 chatForm.addEventListener('submit', async (event) => {

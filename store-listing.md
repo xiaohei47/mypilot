@@ -113,6 +113,59 @@ in the side panel). The extension does not run in the background on other pages.
 - 权限清单：`sidePanel`（侧边栏）、`scripting`（注入脚本操作页面）、`storage`（本地存设置/历史）。
 - 无远程代码、无外部脚本，符合 MV3 安全要求。
 
+## 6.5 隐私权规范标签页（发布拦截项，直接粘贴）
+
+发布时提示的每一项，都在 Dashboard → 该产品的「修改」→「隐私权规范」标签页里填写。以下文案可直接粘贴：
+
+**① 单一用途说明 (Single purpose)**
+```
+MyPilot is a single-purpose AI browser automation assistant. Users describe a web task in plain language, and the agent operates the current tab on their behalf: navigate, click, type, fill forms, select options, check boxes, extract content, and save tables as CSV files. Automation runs only while the user has an active task in the extension's side panel.
+```
+
+**② 远程代码理由 (Remote code)**
+```
+The extension never loads or executes remote code. All JavaScript is bundled in the extension package (service worker, side panel, and the in-page scripts it injects). The only remote requests are (1) the OpenAI-compatible LLM endpoint configured by the user, which is used to generate agent decisions, and (2) navigation to web pages the user asks the agent to visit. No executable code is fetched or run from remote hosts.
+```
+
+**③ 主机权限理由 (Host permissions)**
+```
+MyPilot is a general-purpose web automation agent, so it must be able to operate on any http/https page the user opens. Host permission is required to inject automation scripts into every possible target site. Scripts are injected only when the user explicitly sends a task; the extension does not run automatically in the background on other pages.
+```
+
+**④ scripting 权限理由**
+```
+The scripting permission is used to run automation scripts in the user's current tab via chrome.scripting.executeScript. These scripts perform the requested actions (click, type, fill forms, read page text, extract tables) and return results to the agent. Injection happens only during an active user task.
+```
+
+**⑤ sidePanel 权限理由**
+```
+The sidePanel permission is used to display the extension's chat interface in Chrome's side panel, where the user types their task and reads the agent's actions and responses. The panel opens only when the user clicks the extension icon.
+```
+
+**⑥ storage 权限理由**
+```
+The storage permission saves the user's settings (LLM endpoint and model) and conversation history locally via chrome.storage.local. All data stays on the user's device; nothing is uploaded to us.
+```
+
+**⑦ 联系邮箱验证**
+```
+在 Dashboard → 左侧「设置 Settings」页，点击 "Verify" 验证发布方联系邮箱（Google 会发验证邮件）。验证通过后才能发布。
+```
+
+**⑧ 数据使用确认（隐私问题勾选）**
+与上面文案保持一致地勾选/填写：
+
+| 问题 | 答案 |
+|------|------|
+| 是否收集/传输个人数据 | 是（仅在用户主动运行时，把当前页面文本发给用户自己配置的 LLM 端点） |
+| 收集的数据类型 | 勾选 **Web history** 或 **User activity / Website content**（页面内容），并注明"仅发送给用户自选的 LLM 端点，用于完成自动化任务" |
+| API Key 认证信息 | 不收集到我们这里；仅保存在用户本地（chrome.storage.local），仅发送给用户配置的端点 |
+| 是否加密传输 | 勾选"是"（端点通常为 HTTPS；你可在隐私政策中说明） |
+| 是否由第三方处理 | 勾选"是"，并注明"数据发送至用户配置的第三方 LLM API 提供商" |
+| 远程代码 | 否 |
+
+- 最后在「隐私权规范」页面底部勾选确认 **"MyPilot 的数据使用情况符合开发者计划政策"**，保存草稿。
+
 ## 7. 提交前检查清单
 
 - [ ] `chrome://extensions` 重新加载后功能正常
@@ -126,3 +179,7 @@ in the side panel). The extension does not run in the background on other pages.
 
 - 首审通常 3 天~2 周；若因权限问题被拒，按第 6 节的说明回复即可。
 - 后续更新：改 `manifest.json` 的 `version`，重新打包 zip，在 Dashboard "Package" 处重新上传。
+- **"发布将被推迟 / 可能必须接受深入审核"的警告是自动提示，不是拒绝。** 原因就是我们保留了 `<all_urls>`（为了跨站自动化能力）。处理方式：
+  1. 这是预期内的，提交前把「隐私权规范」标签页的 **③ 主机权限理由** 填好（6.5 节），审核员会看到。
+  2. 若审核员在消息里追问，直接把 6.5 节 ③ 的英文文案回复过去即可。
+  3. 不要改成 `activeTab`——那会失去跨网站继续操作的能力（`goto` 跳转其他域名后权限失效）。
