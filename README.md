@@ -21,9 +21,9 @@ AI Agent 驱动的浏览器自动化 Chrome 扩展，完全自包含（无外部
 1. 打开 `chrome://extensions`
 2. 开启「开发者模式」→「加载已解压的扩展程序」，选择本目录
 3. 打开侧边栏，点击右上角 ⚙ 配置：
-   - **API Key** — OpenAI / DeepSeek / Moonshot / Ollama 等兼容接口的 Key
-   - **Base URL** — 如 `https://api.deepseek.com/v1`（Ollama 本地用 `http://localhost:11434/v1`）
-   - **Model** — 如 `gpt-4o-mini`、`deepseek-chat`
+   - **提供商** — 内置 DeepSeek（base URL 和模型自动带出），或选「自定义」手填
+   - **API Key** — 对应提供商的 Key
+   - **Base URL / Model** — 内置 DeepSeek 会自动填充，可手动覆盖；「自定义」可手填任意 OpenAI 兼容接口（如 Ollama 本地 `http://localhost:11434/v1`）
 4. 在任意 http/https 页面输入任务（如「在搜索框输入 playwright 并回车」）
 
 Agent 会逐步操作你当前正在看的标签页，并汇报进度。遇到不明确的地方会反问，直接回复即可继续；可随时点「停止」。

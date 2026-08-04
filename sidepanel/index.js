@@ -11,6 +11,11 @@ const settingsMsg = document.body.querySelector('#settings-msg');
 const apiKeyInput = document.body.querySelector('#api-key');
 const baseUrlInput = document.body.querySelector('#base-url');
 const modelInput = document.body.querySelector('#model');
+const modelListEl = document.body.querySelector('#model-list');
+const providerInput = document.body.querySelector('#provider');
+const maxIterationsInput = document.body.querySelector('#max-iterations');
+const maxStateCharsInput = document.body.querySelector('#max-state-chars');
+const showThinkingInput = document.body.querySelector('#show-thinking');
 const historyPanel = document.body.querySelector('#history');
 const historyListEl = document.body.querySelector('#history-list');
 const historyNew = document.body.querySelector('#history-new');
@@ -19,12 +24,15 @@ const menuToggle = document.body.querySelector('#menu-toggle');
 const menu = document.body.querySelector('#menu');
 const menuSettings = document.body.querySelector('#menu-settings');
 const menuHistory = document.body.querySelector('#menu-history');
+const headerNew = document.body.querySelector('#header-new');
 const thinkingEl = document.body.querySelector('#thinking');
 const tokensEl = document.body.querySelector('#tokens');
 
 let running = false;
 let configured = false;
 let streamBody = null;
+let reasoningBody = null;
+let currentProviderName = '';
 
 input.addEventListener('input', () => {
   sendButton.disabled = !input.value.trim();
@@ -71,13 +79,22 @@ menuHistory.addEventListener('click', async () => {
 });
 
 historyNew.addEventListener('click', async () => {
+  await startNewConversation();
+});
+
+headerNew.addEventListener('click', async () => {
+  await startNewConversation();
+});
+
+async function startNewConversation() {
   const response = await chrome.runtime.sendMessage({ type: 'history-new' });
   if (response && response.ok) {
     messages.replaceChildren();
     streamBody = null;
+    reasoningBody = null;
     historyPanel.hidden = true;
   }
-});
+}
 
 async function refreshHistory() {
   const response = await chrome.runtime.sendMessage({ type: 'history-list' });
@@ -88,6 +105,14 @@ async function refreshHistory() {
   for (const c of response.list) {
     const item = document.createElement('div');
     item.className = 'history-item';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'history-close';
+    closeBtn.textContent = '×';
+    closeBtn.title = '删除';
+    closeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void deleteHistory(c.id);
+    });
     const info = document.createElement('div');
     info.className = 'history-info';
     const title = document.createElement('div');
@@ -105,11 +130,20 @@ async function refreshHistory() {
       event.stopPropagation();
       void exportHistory(c.id);
     });
+    item.appendChild(closeBtn);
     item.appendChild(info);
     item.appendChild(exportBtn);
     item.addEventListener('click', () => void loadHistory(c.id));
     historyListEl.appendChild(item);
   }
+}
+
+async function deleteHistory(id) {
+  if (!confirm('确定删除这条对话吗？')) {
+    return;
+  }
+  await chrome.runtime.sendMessage({ type: 'history-delete', id });
+  await refreshHistory();
 }
 
 async function exportHistory(id) {
@@ -123,7 +157,7 @@ async function exportHistory(id) {
 }
 
 function buildMarkdown(title, updatedAt, log) {
-  const roleNames = { user: '用户', agent: 'Agent', tool: '操作', system: '系统' };
+  const roleNames = { user: '用户', agent: 'Agent', tool: '操作', system: '系统', reasoning: '思考' };
   const lines = [`# ${title || 'MyPilot 对话'}`, '', `时间：${new Date(updatedAt).toLocaleString()}`, '', '---', ''];
   for (const m of log) {
     lines.push(`**${roleNames[m.role] || m.role}**`, '', m.text, '', '---', '');
@@ -138,36 +172,85 @@ async function loadHistory(id) {
   }
   messages.replaceChildren();
   streamBody = null;
+  reasoningBody = null;
   for (const m of response.log) {
     addMessage(m.role, m.text);
   }
   historyPanel.hidden = true;
 }
 
+let providers = {};
+
+providerInput.addEventListener('change', () => {
+  currentProviderName = providers[providerInput.value]?.name || '';
+  updateStatus();
+  const p = providers[providerInput.value];
+  if (p) {
+    baseUrlInput.value = p.baseUrl || '';
+    populateModelList(p.models);
+    if (p.models && p.models.length) {
+      modelInput.value = p.models[0];
+    }
+  }
+});
+
+function populateModelList(models) {
+  modelListEl.replaceChildren();
+  for (const m of models || []) {
+    const opt = document.createElement('option');
+    opt.value = m;
+    modelListEl.appendChild(opt);
+  }
+}
+
 settingsSave.addEventListener('click', async () => {
   const settings = {
+    provider: providerInput.value,
     apiKey: apiKeyInput.value.trim(),
     baseUrl: baseUrlInput.value.trim(),
-    model: modelInput.value.trim()
+    model: modelInput.value.trim(),
+    maxIterations: Number(maxIterationsInput.value) || 20,
+    maxStateChars: Number(maxStateCharsInput.value) || 6000,
+    showThinking: showThinkingInput.value === 'true'
   };
   const response = await chrome.runtime.sendMessage({ type: 'save-settings', settings });
   if (response && response.ok) {
     configured = Boolean(settings.apiKey);
-    settingsMsg.textContent = '已保存';
+    settingsMsg.hidden = true;
+    settingsPanel.hidden = true;
   } else {
     settingsMsg.textContent = '保存失败';
+    settingsMsg.hidden = false;
   }
-  settingsMsg.hidden = false;
   updateStatus();
 });
 
+function applySettings(response) {
+  if (!response || !response.settings) {
+    return;
+  }
+  providers = response.providers || {};
+  providerInput.replaceChildren();
+  for (const [id, p] of Object.entries(providers)) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = p.name;
+    providerInput.appendChild(opt);
+  }
+  providerInput.value = response.settings.provider || 'custom';
+  currentProviderName = providers[providerInput.value]?.name || '';
+  populateModelList(providers[providerInput.value]?.models);
+  apiKeyInput.value = response.settings.apiKey || '';
+  baseUrlInput.value = response.settings.baseUrl || '';
+  modelInput.value = response.settings.model || '';
+  maxIterationsInput.value = response.settings.maxIterations || '';
+  maxStateCharsInput.value = response.settings.maxStateChars || '';
+  showThinkingInput.value = response.settings.showThinking ? 'true' : 'false';
+}
+
 settingsCancel.addEventListener('click', async () => {
   const response = await chrome.runtime.sendMessage({ type: 'get-settings' });
-  if (response && response.settings) {
-    apiKeyInput.value = response.settings.apiKey || '';
-    baseUrlInput.value = response.settings.baseUrl || '';
-    modelInput.value = response.settings.model || '';
-  }
+  applySettings(response);
   settingsMsg.hidden = true;
   settingsPanel.hidden = true;
 });
@@ -211,6 +294,27 @@ chrome.runtime.onMessage.addListener((message) => {
       streamBody.textContent += message.delta;
       messages.scrollTop = messages.scrollHeight;
       break;
+    case 'agent-reasoning-start':
+      if (!reasoningBody) {
+        reasoningBody = createReasoningBlock();
+      }
+      break;
+    case 'agent-reasoning-delta':
+      if (!reasoningBody) {
+        reasoningBody = createReasoningBlock();
+      }
+      reasoningBody.textContent += message.delta;
+      messages.scrollTop = messages.scrollHeight;
+      break;
+    case 'agent-reasoning-end':
+      if (!reasoningBody) {
+        reasoningBody = createReasoningBlock();
+      }
+      reasoningBody.textContent = message.text;
+      reasoningBody.parentElement.querySelector('.reasoning-toggle').textContent = '▸';
+      reasoningBody.parentElement.classList.remove('reasoning-open');
+      messages.scrollTop = messages.scrollHeight;
+      break;
     case 'download-csv':
       downloadFile(message.filename, message.csv);
       break;
@@ -223,6 +327,7 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'agent-done':
       thinkingEl.hidden = true;
       streamBody = null;
+      reasoningBody = null;
       running = false;
       stopButton.hidden = true;
       sendButton.disabled = !input.value.trim();
@@ -232,6 +337,7 @@ chrome.runtime.onMessage.addListener((message) => {
       thinkingEl.hidden = true;
       addMessage('system', `错误：${message.text}`);
       streamBody = null;
+      reasoningBody = null;
       running = false;
       stopButton.hidden = true;
       sendButton.disabled = !input.value.trim();
@@ -254,9 +360,43 @@ function createMessage(role) {
 }
 
 function addMessage(role, text) {
+  if (role === 'reasoning') {
+    const body = createReasoningBlock();
+    body.textContent = text;
+    body.parentElement.classList.remove('reasoning-open');
+    messages.scrollTop = messages.scrollHeight;
+    return;
+  }
   const { body } = createMessage(role);
   body.textContent = text;
   messages.scrollTop = messages.scrollHeight;
+}
+
+function createReasoningBlock() {
+  const el = document.createElement('div');
+  el.className = 'message reasoning';
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'reasoning-header';
+  const toggle = document.createElement('span');
+  toggle.className = 'reasoning-toggle';
+  toggle.textContent = '▸';
+  const label = document.createElement('span');
+  label.className = 'reasoning-label';
+  label.textContent = '思考过程';
+  header.appendChild(toggle);
+  header.appendChild(label);
+  const body = document.createElement('div');
+  body.className = 'reasoning-body';
+  header.addEventListener('click', () => {
+    const open = el.classList.toggle('reasoning-open');
+    toggle.textContent = open ? '▾' : '▸';
+  });
+  el.appendChild(header);
+  el.appendChild(body);
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return body;
 }
 
 function downloadFile(filename, content) {
@@ -276,7 +416,7 @@ function updateStatus() {
     statusEl.textContent = '运行中';
     statusEl.className = 'status running';
   } else if (configured) {
-    statusEl.textContent = '已就绪';
+    statusEl.textContent = currentProviderName ? `已就绪 · ${currentProviderName}` : '已就绪';
     statusEl.className = 'status ready';
   } else {
     statusEl.textContent = '未配置';
@@ -289,10 +429,8 @@ function updateTokens(tokens) {
 }
 
 void chrome.runtime.sendMessage({ type: 'get-settings' }).then((response) => {
+  applySettings(response);
   if (response && response.settings) {
-    apiKeyInput.value = response.settings.apiKey || '';
-    baseUrlInput.value = response.settings.baseUrl || '';
-    modelInput.value = response.settings.model || '';
     configured = Boolean(response.settings.apiKey);
     updateStatus();
   }

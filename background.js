@@ -1,11 +1,25 @@
 const DEFAULTS = {
+  provider: 'deepseek',
   apiKey: '',
-  baseUrl: 'https://api.openai.com/v1',
-  model: 'gpt-4o-mini'
+  baseUrl: 'https://api.deepseek.com',
+  model: 'deepseek-v4-flash',
+  maxIterations: 20,
+  maxStateChars: 6000,
+  showThinking: false
 };
 
-const MAX_ITERATIONS = 20;
-const MAX_STATE_CHARS = 6000;
+const PROVIDERS = {
+  deepseek: {
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro']
+  },
+  custom: {
+    name: '自定义',
+    baseUrl: '',
+    models: []
+  }
+};
 
 const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览器中的当前页面完成用户的任务。
 
@@ -86,6 +100,10 @@ function broadcastTokens(tokens) {
   void chrome.runtime.sendMessage({ type: 'agent-tokens', tokens }).catch(() => {});
 }
 
+function broadcastTitle(title) {
+  void chrome.runtime.sendMessage({ type: 'agent-title', title }).catch(() => {});
+}
+
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((error) => console.error(error));
@@ -97,7 +115,7 @@ void chrome.storage.local.get(DEFAULTS).then((saved) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.type) {
     case 'get-settings':
-      sendResponse({ settings });
+      sendResponse({ settings, providers: PROVIDERS });
       return false;
     case 'save-settings':
       settings = { ...DEFAULTS, ...message.settings };
@@ -138,14 +156,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true, title: found.title, updatedAt: found.updatedAt, log: found.log });
       })();
       return true;
+    case 'history-delete':
+      void (async () => {
+        const { conversations = [] } = await chrome.storage.local.get('conversations');
+        await chrome.storage.local.set({ conversations: conversations.filter((c) => c.id !== message.id) });
+        sendResponse({ ok: true });
+      })();
+      return true;
     case 'get-tokens':
-      sendResponse({ tokens: totalTokens });
+      sendResponse({ tokens: totalTokens, title: currentTitle });
       return false;
     case 'history-new':
       currentConversationId = null;
       conversation = [];
       uiLog = [];
       totalTokens = 0;
+      currentTitle = '';
+      broadcastTitle(currentTitle);
       sendResponse({ ok: true });
       return false;
     case 'agent-run':
@@ -295,7 +322,7 @@ async function runAgentLoop(tabId) {
   let cycleKey2 = null;
   let cycleCount = 0;
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
+  for (let i = 0; i < settings.maxIterations; i++) {
     if (abortFlag) {
       notify({ type: 'agent-message', role: 'system', text: '已停止' });
       return;
@@ -305,7 +332,7 @@ async function runAgentLoop(tabId) {
     let model;
     notify({ type: 'agent-thinking', on: true });
     try {
-      model = await askModel(state, i === MAX_ITERATIONS - 1);
+      model = await askModel(state, i === settings.maxIterations - 1);
     } finally {
       notify({ type: 'agent-thinking', on: false });
     }
@@ -332,7 +359,7 @@ async function runAgentLoop(tabId) {
       return;
     }
 
-    if (i === MAX_ITERATIONS - 1) {
+    if (i === settings.maxIterations - 1) {
       notify({ type: 'agent-message', role: 'system', text: '已达最后一步，结束任务。' });
       return;
     }
@@ -399,12 +426,12 @@ async function runAgentLoop(tabId) {
       });
     }
   }
-  notify({ type: 'agent-message', role: 'system', text: `已达到最大迭代次数（${MAX_ITERATIONS}）` });
+  notify({ type: 'agent-message', role: 'system', text: `已达到最大迭代次数（${settings.maxIterations}）` });
 }
 
 async function collectState(tabId) {
   try {
-    const frames = await evalInAllFrames(tabId, getStateScript, [MAX_STATE_CHARS]);
+    const frames = await evalInAllFrames(tabId, getStateScript, [settings.maxStateChars]);
     const sections = frames
       .map((f) => {
         const s = f.result;
@@ -439,11 +466,42 @@ async function askModel(state, lastStep) {
 
   let fullContent = '';
   let visible = true;
+  let thinkingContent = '';
+  let thinkingStarted = false;
   const promptTokens = estimateTokens(JSON.stringify(messages));
   let completionTokens = 0;
   let lastTokenBroadcast = 0;
 
+  const startThinking = () => {
+    if (!settings.showThinking || thinkingStarted) {
+      return;
+    }
+    thinkingStarted = true;
+    notify({ type: 'agent-reasoning-start' });
+  };
+
+  const broadcastThinking = (delta) => {
+    if (!settings.showThinking) {
+      return;
+    }
+    startThinking();
+    thinkingContent += delta;
+    notify({ type: 'agent-reasoning-delta', delta });
+  };
+
+  const endThinking = () => {
+    if (!settings.showThinking || !thinkingStarted) {
+      return;
+    }
+    thinkingStarted = false;
+    notify({ type: 'agent-reasoning-end', text: thinkingContent });
+    if (thinkingContent.trim()) {
+      logMessage('reasoning', thinkingContent);
+    }
+  };
+
   const handleDelta = (delta) => {
+    endThinking();
     fullContent += delta;
     completionTokens += estimateTokens(delta);
     const now = Date.now();
@@ -459,30 +517,35 @@ async function askModel(state, lastStep) {
     }
   };
 
-  const processLine = (line) => {
-    const t = line.trim();
-    if (!t.startsWith('data:')) {
-      return;
-    }
-    const data = t.slice(5).trim();
-    if (!data || data === '[DONE]') {
-      return;
-    }
-    try {
-      const parsed = JSON.parse(data);
-      const delta =
-        parsed.choices && parsed.choices[0] && parsed.choices[0].delta
-          ? parsed.choices[0].delta.content
-          : null;
-      if (delta) {
-        handleDelta(delta);
+  const readStream = async (response, onEvent) => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let rawAll = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
       }
-    } catch {
-      /* 忽略无法解析的事件 */
+      const chunk = decoder.decode(value, { stream: true });
+      rawAll += chunk;
+      buffer += chunk;
+      let idx;
+      while ((idx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        if (line.trim().startsWith('data:')) {
+          onEvent(line.slice(5).trim());
+        }
+      }
     }
+    if (buffer.trim().startsWith('data:')) {
+      onEvent(buffer.slice(5).trim());
+    }
+    return rawAll;
   };
 
-  try {
+  const requestOpenAI = async () => {
     const url = `${settings.baseUrl.replace(/\/+$/, '')}/chat/completions`;
     let response = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -525,33 +588,35 @@ async function askModel(state, lastStep) {
       fullContent = data.choices && data.choices[0] ? data.choices[0].message.content : '';
       completionTokens += estimateTokens(fullContent);
     } else {
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let rawAll = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
+      const rawAll = await readStream(response, (data) => {
+        if (!data || data === '[DONE]') {
+          return;
         }
-        const chunk = decoder.decode(value, { stream: true });
-        rawAll += chunk;
-        buffer += chunk;
-        let idx;
-        while ((idx = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 1);
-          processLine(line);
+        try {
+          const parsed = JSON.parse(data);
+          const choice = parsed.choices && parsed.choices[0];
+          const deltaObj = choice && choice.delta ? choice.delta : {};
+          if (deltaObj.reasoning_content) {
+            broadcastThinking(deltaObj.reasoning_content);
+          }
+          const delta = deltaObj.content || null;
+          if (delta) {
+            handleDelta(delta);
+          }
+        } catch {
+          /* 忽略无法解析的事件 */
         }
-      }
-      if (buffer.trim()) {
-        processLine(buffer);
-      }
+      });
       if (!fullContent && rawAll.trim()) {
         try {
           const data = JSON.parse(rawAll.trim());
-          const content = data.choices && data.choices[0] ? data.choices[0].message.content : '';
+          const msg = data.choices && data.choices[0] ? data.choices[0].message : null;
+          if (msg && msg.reasoning_content && settings.showThinking) {
+            broadcastThinking(msg.reasoning_content);
+          }
+          const content = msg ? msg.content : '';
           if (content) {
+            endThinking();
             fullContent = content;
             completionTokens += estimateTokens(content);
             const trimmed = content.trimStart();
@@ -564,12 +629,17 @@ async function askModel(state, lastStep) {
         }
       }
     }
+  };
+
+  try {
+    await requestOpenAI();
   } catch (error) {
     if (error.name === 'AbortError') {
       throw error;
     }
     throw new Error(`LLM 调用失败: ${error.message}`);
   } finally {
+    endThinking();
     totalTokens += promptTokens + completionTokens;
     broadcastTokens(totalTokens);
   }

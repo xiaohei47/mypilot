@@ -6,6 +6,9 @@
   </head>
   <body>
     <header class="header">
+      <div class="header-left">
+        <button id="header-new" class="header-new" title="新对话">+ 新对话</button>
+      </div>
       <div class="header-right">
         <div id="status" class="status">未配置</div>
         <div id="menu-wrap" class="menu-wrap">
@@ -27,6 +30,9 @@
     </section>
 
     <section id="settings" class="settings" hidden>
+      <label>提供商
+        <select id="provider"></select>
+      </label>
       <label>API Key
         <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" />
       </label>
@@ -34,7 +40,20 @@
         <input id="base-url" placeholder="https://api.openai.com/v1" />
       </label>
       <label>Model
-        <input id="model" placeholder="gpt-4o-mini" />
+        <input id="model" placeholder="gpt-4o-mini" list="model-list" />
+        <datalist id="model-list"></datalist>
+      </label>
+      <label>最大迭代次数
+        <input id="max-iterations" type="number" min="1" placeholder="20" />
+      </label>
+      <label>页面状态字符上限
+        <input id="max-state-chars" type="number" min="100" placeholder="6000" />
+      </label>
+      <label>显示思考过程
+        <select id="show-thinking">
+          <option value="false">否</option>
+          <option value="true">是</option>
+        </select>
       </label>
       <div class="settings-actions">
         <button id="settings-save" class="primary">保存</button>
@@ -61,6 +80,7 @@
       </div>
     </form>
 
+    <div id="chat-title" class="chat-title" hidden></div>
     <div id="tokens" class="tokens">0K</div>
 
     <script src="index.js" type="module"></script>
