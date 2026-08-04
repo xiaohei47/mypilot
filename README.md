@@ -24,6 +24,8 @@ AI Agent 驱动的浏览器自动化 Chrome 扩展，完全自包含（无外部
    - **提供商** — 内置 DeepSeek（base URL 和模型自动带出），或选「自定义」手填
    - **API Key** — 对应提供商的 Key
    - **Base URL / Model** — 内置 DeepSeek 会自动填充，可手动覆盖；「自定义」可手填任意 OpenAI 兼容接口（如 Ollama 本地 `http://localhost:11434/v1`）
+   - **最大操作次数** — Agent 单次任务最多执行的操作步数（默认 20）
+   - **显示思考过程** — 开启后展示模型推理内容（DeepSeek 等带 reasoning 的模型），默认关闭
 4. 在任意 http/https 页面输入任务（如「在搜索框输入 playwright 并回车」）
 
 Agent 会逐步操作你当前正在看的标签页，并汇报进度。遇到不明确的地方会反问，直接回复即可继续；可随时点「停止」。
