@@ -54,11 +54,16 @@ const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览
 18. {"action":"extract","text":"..."} 或 {"action":"extract","selector":"..."} - 提取元素文本内容供分析
 19. {"action":"extract_table","index":0} - 提取第 index 个表格内容
 20. {"action":"save_table","index":0,"filename":"表格.csv"} - 将表格保存为 CSV 文件并触发下载
+21. {"action":"collect_images"} - 抓取当前页面所有图片，打包为 zip 下载
+22. {"action":"run_js","code":"..."} - 在页面直接执行一段 JavaScript 代码并返回结果。用于普通操作实现不了的效果：隐藏/显示元素、修改样式、绕过页面限制、点击 shadow DOM 内部元素、操作 canvas 等。代码是立即执行函数体，可用 return 返回结果（会被序列化为文本）；不要用 console.log 输出结果。代码会分别注入页面的每个 frame 执行，document 指向所在 frame，直接操作即可，无需访问 window.parent 或跨域 hack。
 
 其它:
-21. {"action":"ask","question":"..."} - 任务不明确时询问用户
+23. {"action":"ask","question":"..."} - 任务不明确时询问用户
 
 规则：
+- 使用 run_js 时，代码应当健壮：用 try/catch 包裹，对可能不存在的元素做判空；不要访问 window.parent/top 去操作别的 frame。
+- run_js 执行成功即视为该步完成：只要返回 status="success" 且不是"未找到"，就不要再检查、不要重复执行相同代码，直接基于已有信息给出最终答复。
+- 如果 run_js 返回"未找到"类结果，说明目标不在当前已注入的页面里，直接说明原因并结束，不要尝试跨 frame 访问，也不要乱点无关元素试探。
 - 页面状态中包含"可交互元素"列表（输入框/按钮/下拉等），优先据此选择操作目标。
 - 点击目标优先使用精确的可见文本。
 - 一次只执行一步操作，等待下一页状态后再继续。
@@ -66,6 +71,7 @@ const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览
 - 任务完成时，直接用自然语言输出最终答复（不要输出 JSON）。
 - 无法推进任务时，也用自然语言说明原因并结束。
 - 当用户要求"整理/输出/导出表格文件"时：先 extract_table 查看内容，再用 save_table 保存为文件，最后用自然语言总结。
+- 当用户要求"下载/抓取/保存页面图片"时：直接使用 collect_images 打包下载，完成后用自然语言总结。
 - 页面内容可能来自多个内嵌页面（frame），注意阅读所有 frame 的内容，操作会自动在所有 frame 中查找目标。
 
 任务纪律（非常重要）：
@@ -760,6 +766,10 @@ function describeAction(action) {
       return `提取表格内容（第 ${action.index ?? 0} 个）`;
     case 'save_table':
       return `保存表格为文件 ${action.filename || 'table.csv'}`;
+    case 'collect_images':
+      return `抓取页面所有图片并打包下载`;
+    case 'run_js':
+      return `执行页面脚本`;
     default:
       return JSON.stringify(action);
   }
@@ -953,6 +963,75 @@ async function executeAction(tabId, action) {
         conversation.push({ role: 'user', content: `<tool_result name="save_table" status="success">已保存文件 ${filename}</tool_result>` });
         notify({ type: 'download-csv', filename, csv });
         notify({ type: 'agent-message', role: 'tool', text: `已生成文件：${filename}` });
+        return { ok: true };
+      }
+
+      case 'collect_images': {
+        const frames = await evalInAllFrames(tabId, collectImagesScript, []);
+        const urls = [];
+        const seen = new Set();
+        for (const f of frames) {
+          for (const u of f.result || []) {
+            if (!seen.has(u)) {
+              seen.add(u);
+              urls.push(u);
+            }
+          }
+        }
+        if (!urls.length) {
+          return { ok: false, error: '页面上没有找到图片' };
+        }
+        const files = [];
+        for (let i = 0; i < urls.length; i++) {
+          if (abortFlag) {
+            break;
+          }
+          try {
+            const res = await fetch(urls[i], { signal: abortController.signal });
+            if (!res.ok) {
+              continue;
+            }
+            const buf = new Uint8Array(await res.arrayBuffer());
+            let binary = '';
+            for (let j = 0; j < buf.length; j++) {
+              binary += String.fromCharCode(buf[j]);
+            }
+            const ext = guessImageExt(urls[i], res.headers.get('content-type'));
+            files.push({ name: `image_${i + 1}.${ext}`, base64: btoa(binary) });
+          } catch {
+            /* 跳过无法下载的图片 */
+          }
+        }
+        if (!files.length) {
+          return { ok: false, error: '图片下载失败（可能存在防盗链）' };
+        }
+        const filename = `images_${new Date().toISOString().slice(0, 10)}.zip`;
+        conversation.push({ role: 'user', content: `<tool_result name="collect_images" status="success">已打包下载 ${files.length}/${urls.length} 张图片</tool_result>` });
+        notify({ type: 'download-bundle', filename, files });
+        notify({ type: 'agent-message', role: 'tool', text: `已打包下载 ${files.length} 张图片：${filename}` });
+        return { ok: true };
+      }
+
+      case 'run_js': {
+        if (!action.code || !String(action.code).trim()) {
+          return { ok: false, error: 'run_js 缺少 code 参数' };
+        }
+        const frames = await evalInAllFrames(tabId, runJsScript, [action.code]);
+        const isFail = (t) => /未找到|没有找到|找不到|not\s*find|未发现/i.test(String(t || ''));
+        const hit = frames.find((r) => r.result && r.result.ok && !isFail(r.result.text)) ||
+          frames.find((r) => r.result && r.result.ok);
+        const failed = frames.find((r) => r.result && !r.result.ok);
+        if (!hit && !failed) {
+          return { ok: false, error: '脚本没有返回结果' };
+        }
+        const result = hit ? hit.result : failed.result;
+        if (!result.ok) {
+          return { ok: false, error: `脚本执行失败: ${result.error}` };
+        }
+        const text = result.text || '(无返回)';
+        const snippet = text.slice(0, 4000);
+        conversation.push({ role: 'user', content: `<tool_result name="run_js" status="success">${snippet}</tool_result>` });
+        notify({ type: 'agent-message', role: 'tool', text: `[脚本执行]\n${snippet.slice(0, 500)}` });
         return { ok: true };
       }
 
@@ -1313,6 +1392,15 @@ function extractTableScript(index) {
       rows.push(cells);
     }
   }
+  if (rows.length > 1) {
+    const width = rows[0].length;
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.length === width + 1 && r[0] === '') {
+        rows[i] = r.slice(1);
+      }
+    }
+  }
   return { rows, tableCount: tables.length };
 }
 
@@ -1322,4 +1410,76 @@ function toCsv(rows) {
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   return rows.map((row) => row.map(escape).join(',')).join('\r\n');
+}
+
+function collectImagesScript() {
+  const urls = [];
+  const seen = new Set();
+  const push = (u) => {
+    if (!u || /^data:|^blob:|^javascript:/i.test(u)) {
+      return;
+    }
+    if (!seen.has(u)) {
+      seen.add(u);
+      urls.push(u);
+    }
+  };
+  for (const img of document.querySelectorAll('img')) {
+    push(img.currentSrc || img.src);
+    push(img.getAttribute('src'));
+  }
+  for (const el of document.querySelectorAll('source')) {
+    push(el.getAttribute('src') || el.getAttribute('srcset'));
+  }
+  for (const el of document.querySelectorAll('[style*="background-image"]')) {
+    const m = el.style.backgroundImage.match(/url\(["']?([^"')]+)["']?\)/);
+    if (m) {
+      push(m[1]);
+    }
+  }
+  return urls;
+}
+
+function guessImageExt(url, contentType) {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  const map = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/bmp': 'bmp' };
+  if (map[type]) {
+    return map[type];
+  }
+  const m = url.match(/\.([a-z0-9]+)(?:[?#]|$)/i);
+  if (m) {
+    return m[1];
+  }
+  return 'jpg';
+}
+
+function runJsScript(code) {
+  try {
+    let value;
+    try {
+      value = new Function(`return (${code});`)();
+    } catch {
+      value = new Function(code)();
+    }
+    if (value && typeof value === 'object' && value.status === 'error') {
+      return { ok: false, error: value.message || '脚本返回 error' };
+    }
+    let text;
+    if (value === null || value === undefined) {
+      text = String(value);
+    } else if (typeof value === 'string') {
+      text = value;
+    } else if (typeof value === 'object') {
+      try {
+        text = JSON.stringify(value);
+      } catch {
+        text = String(value);
+      }
+    } else {
+      text = String(value);
+    }
+    return { ok: true, text };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 }

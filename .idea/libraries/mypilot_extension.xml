@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="mypilot-extension">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/dist/mypilot-extension.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

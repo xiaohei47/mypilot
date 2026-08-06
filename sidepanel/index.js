@@ -335,6 +335,9 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'download-csv':
       downloadFile(message.filename, message.csv);
       break;
+    case 'download-bundle':
+      downloadBundle(message.filename, message.files);
+      break;
     case 'agent-thinking':
       thinkingEl.hidden = !message.on;
       break;
@@ -454,6 +457,23 @@ function downloadFile(filename, content) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function downloadBundle(filename, files) {
+  const zip = new JSZip();
+  for (const f of files || []) {
+    zip.file(f.name, f.base64, { base64: true });
+  }
+  void zip.generateAsync({ type: 'blob' }).then((blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
 }
 
 function updateStatus() {
