@@ -42,11 +42,15 @@ input.addEventListener('input', () => {
 });
 
 input.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  // isComposing：中文输入法选词时的回车不应发送
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     chatForm.requestSubmit();
   }
 });
+
+// 与 service worker 建立长连接，防止任务执行期间 SW 被回收（MV3 空闲约 30s 会休眠）
+void chrome.runtime.connect({ name: 'keepalive' });
 
 menuToggle.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -448,7 +452,10 @@ function createReasoningBlock() {
 }
 
 function downloadFile(filename, content) {
-  const blob = new Blob(['\ufeff' + content], { type: 'text/csv;charset=utf-8' });
+  const isMarkdown = /\.md$/i.test(filename);
+  const blob = new Blob(['\ufeff' + content], {
+    type: isMarkdown ? 'text/markdown;charset=utf-8' : 'text/csv;charset=utf-8'
+  });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -520,11 +527,8 @@ async function refreshBalance() {
 
 void refreshBalance();
 
-void chrome.runtime.sendMessage({ type: 'history-list' }).then((response) => {
-  if (response && response.list && response.list.length) {
-    void loadHistory(response.list[0].id);
-  }
-});
+// 每次打开侧边栏都从新对话开始（历史对话仍可在菜单中查看）
+void startNewConversation();
 
 async function refreshPageTitle() {
   const response = await chrome.runtime.sendMessage({ type: 'page-title' });

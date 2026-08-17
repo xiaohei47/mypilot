@@ -8,9 +8,14 @@
 
 ## 1. 提交文件
 
-- 使用 `dist/mypilot-extension.zip`（已包含新图标，版本 0.6）
+- 使用 `dist/mypilot-extension.zip`(版本 0.9，已修复 8/11 被拒问题)
 - 上传到 Chrome Web Store Developer Dashboard → "New Item" → 上传 zip
 - 注意：上传 zip 前，先在本地 `chrome://extensions` 验证功能正常
+
+> 2026-08-11 拒绝原因及修复：
+> 1. **Red Potassium（内容政策）**：`new URL(tab.url)` 在 `chrome://` 等无 `tab.url` 的页面上抛 "Failed to construct URL : Invalid URL"。
+>    已修复：`background.js` 中对 `tab.url` 做防御性解析，并对 `goto` 的 URL 做规范化/校验（补全 https:// 前缀、无效地址返回明确错误）。
+> 2. **Purple Nickel（用户数据隐私）**：隐私政策链接必须填在 **Dashboard → 该产品 → 修改 → 「隐私权」标签页** 的隐私政策链接字段，**不要写进产品说明**。把 5 节的隐私政策草稿放到一个公开网页（GitHub Pages 等），再把链接填到该字段并保存。
 
 ## 2. 商店信息（Dashboard 填写）
 
@@ -78,8 +83,11 @@ en（可再添加 zh-CN）
 
 因为扩展会把**页面内容**发送到用户配置的 LLM 端点，商店会要求隐私政策。
 
+- **必须**把隐私政策链接填在 **Dashboard → 该产品 → 「修改」 → 「隐私权」标签页** 的"隐私权政策链接"字段里，**不要**加在产品说明中（被拒项 Purple Nickel）。
+- 把下面的隐私政策草稿发布到任意公开网页（GitHub Pages、博客等），确保链接可公开访问、不返回 404。
 - 若勾选 "本扩展传输数据"，需要填一个**隐私政策 URL**（随便一个网页，如 GitHub Pages 或你的博客）。
-- 可用的隐私政策草稿（放到任意网页即可）：
+- **2026-08-13 版本 0.9 再次被拒（Purple Nickel）：完全没提供隐私政策。** 现成的完整草稿在仓库 `privacy-policy.md`，直接把它贴到你博客/任意公开网页上，得到公开 URL 后填进上面的字段。
+- 把下面的简版草稿放到任意网页即可（完整版用 `privacy-policy.md`）：
 
 ```
 Privacy Policy for MyPilot
@@ -171,7 +179,8 @@ The storage permission saves the user's settings (LLM endpoint and model) and co
 - [ ] `chrome://extensions` 重新加载后功能正常
 - [ ] 图标已替换（不再使用 Google Gemini 图标）
 - [ ] 至少 1 张截图就绪
-- [ ] 隐私政策 URL 就绪（放一个网页）
+- [ ] 隐私政策 URL 就绪（用 `privacy-policy.md` 发布到公开网页）
+- [ ] **Dashboard → 该产品 → 「修改」 → 「隐私权」标签页 → 在"隐私权政策链接"字段填入该 URL 并保存**（不是产品说明里）
 - [ ] `dist/mypilot-extension.zip` 为最新（本目录内容 = zip 内容）
 - [ ] 说明文字中不含 "Playwright" 等可能引起商标/混淆的词（本扩展不依赖 Playwright）
 

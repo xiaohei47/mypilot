@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MyPilot",
-  "version": "0.7",
+  "version": "0.9",
   "description": "AI Agent 驱动的浏览器自动化，基于 chrome.scripting + OpenAI 兼容 LLM，完全自包含。",
   "background": {
     "service_worker": "background.js"

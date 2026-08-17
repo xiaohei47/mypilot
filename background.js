@@ -66,6 +66,7 @@ const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览
 - 如果 run_js 返回"未找到"类结果，说明目标不在当前已注入的页面里，直接说明原因并结束，不要尝试跨 frame 访问，也不要乱点无关元素试探。
 - 页面状态中包含"可交互元素"列表（输入框/按钮/下拉等），优先据此选择操作目标。
 - 点击目标优先使用精确的可见文本。
+- 如果可交互元素列表中找不到用户要操作的目标，说明该目标当前不在页面上或名称不对：不要原样重复操作，先 extract 查看页面实际内容，再决定是换个名称还是说明找不到。
 - 一次只执行一步操作，等待下一页状态后再继续。
 - 任务模糊时使用 ask 询问用户，而不是猜测。
 - 任务完成时，直接用自然语言输出最终答复（不要输出 JSON）。
@@ -114,15 +115,39 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((error) => console.error(error));
 
-void chrome.storage.local.get(DEFAULTS).then((saved) => {
-  settings = { ...DEFAULTS, ...saved };
+// 侧边栏打开期间通过长连接保活 service worker,避免 agent 循环中途被回收
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'keepalive') {
+    port.onDisconnect.addListener(() => {});
+  }
 });
+
+// 启动时恢复设置与上一次的活动对话(service worker 重启后内存状态会丢失)
+// settingsReady 确保冷启动时 get-settings / handleRun 等到设置加载完成，避免首次打开误报"未配置"
+const settingsReady = chrome.storage.local
+  .get([...Object.keys(DEFAULTS), 'mypilot_state'])
+  .then((saved) => {
+    for (const key of Object.keys(DEFAULTS)) {
+      if (saved[key] !== undefined) {
+        settings[key] = saved[key];
+      }
+    }
+    const state = saved.mypilot_state;
+    if (state && state.conversationId) {
+      currentConversationId = state.conversationId;
+      currentTitle = state.title || '';
+      conversation = Array.isArray(state.conversation) ? state.conversation : [];
+      uiLog = Array.isArray(state.uiLog) ? state.uiLog : [];
+      totalTokens = state.tokens || 0;
+    }
+  })
+  .catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.type) {
     case 'get-settings':
-      sendResponse({ settings, providers: PROVIDERS });
-      return false;
+      void settingsReady.then(() => sendResponse({ settings, providers: PROVIDERS }));
+      return true;
     case 'save-settings':
       settings = { ...DEFAULTS, ...message.settings };
       void chrome.storage.local.set(settings);
@@ -182,6 +207,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         uiLog = found.log.slice();
         totalTokens = found.tokens || 0;
         broadcastTokens(totalTokens);
+        await persistConversation();
         sendResponse({ ok: true, title: found.title, log: found.log });
       })();
       return true;
@@ -207,14 +233,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ tokens: totalTokens, title: currentTitle });
       return false;
     case 'history-new':
-      currentConversationId = null;
-      conversation = [];
-      uiLog = [];
-      totalTokens = 0;
-      currentTitle = '';
-      broadcastTitle(currentTitle);
-      sendResponse({ ok: true });
-      return false;
+      void (async () => {
+        if (currentConversationId && conversation.length) {
+          await persistConversation();
+        }
+        currentConversationId = null;
+        conversation = [];
+        uiLog = [];
+        totalTokens = 0;
+        currentTitle = '';
+        broadcastTitle(currentTitle);
+        await chrome.storage.local.set({ mypilot_state: null });
+        sendResponse({ ok: true });
+      })();
+      return true;
     case 'agent-run':
       void handleRun(message.text);
       sendResponse({ ok: true });
@@ -241,6 +273,11 @@ function logMessage(role, text) {
   schedulePersist();
 }
 
+function pushConversation(role, content) {
+  conversation.push({ role, content });
+  schedulePersist();
+}
+
 function schedulePersist() {
   clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
@@ -261,7 +298,17 @@ async function persistConversation() {
     updatedAt: Date.now()
   };
   const next = [entry, ...conversations.filter((c) => c.id !== currentConversationId)].slice(0, 20);
-  await chrome.storage.local.set({ conversations: next });
+  await chrome.storage.local.set({
+    conversations: next,
+    mypilot_state: {
+      conversationId: currentConversationId,
+      title: currentTitle,
+      conversation: conversation.slice(),
+      uiLog: uiLog.slice(),
+      tokens: totalTokens,
+      updatedAt: Date.now()
+    }
+  });
 }
 
 function sleep(ms) {
@@ -311,6 +358,44 @@ async function evalInAllFrames(tabId, fn, args) {
   }
 }
 
+// 按 frame 顺序执行动作：先探测所有 frameId，main frame（0）优先，逐 frame 执行，
+// 找到第一个成功结果即停止。避免同名元素（如"确定"按钮）在多个 frame 中被重复点击。
+async function evalInFramesSequential(tabId, fn, args, isSuccess) {
+  let frameIds = [];
+  try {
+    const probe = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: 'MAIN',
+      func: () => true,
+      args: []
+    });
+    frameIds = probe.map((r) => r.frameId);
+  } catch {
+    frameIds = [0];
+  }
+  frameIds.sort((a, b) => a - b);
+  for (const frameId of frameIds) {
+    if (abortFlag) {
+      return { found: false };
+    }
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [frameId] },
+        world: 'MAIN',
+        func: fn,
+        args: args || []
+      });
+      const result = results && results[0] ? results[0].result : undefined;
+      if (isSuccess(result)) {
+        return { found: true, result };
+      }
+    } catch {
+      // frame 已导航或不可访问，跳过
+    }
+  }
+  return { found: false };
+}
+
 async function handleRun(userText) {
   if (running) {
     notify({ type: 'agent-message', role: 'system', text: '已有任务正在执行，请等待完成或点击「停止」' });
@@ -327,15 +412,24 @@ async function handleRun(userText) {
     totalTokens = 0;
     broadcastTokens(0);
   }
-  conversation.push({ role: 'user', content: userText });
+  pushConversation('user', userText);
   logMessage('user', userText);
 
   try {
+    await settingsReady;
     if (!settings.apiKey) {
       throw new Error('请先点击右上角 ⚙ 配置 API Key');
     }
     const tab = await getActiveTab();
-    if (!tab || !/^https?:$/.test(new URL(tab.url).protocol)) {
+    let tabProtocol = '';
+    if (tab && tab.url) {
+      try {
+        tabProtocol = new URL(tab.url).protocol;
+      } catch {
+        tabProtocol = '';
+      }
+    }
+    if (!tab || !/^https?:$/.test(tabProtocol)) {
       throw new Error('请在 http/https 页面中使用');
     }
     await runAgentLoop(tab.id);
@@ -358,6 +452,7 @@ async function handleRun(userText) {
 async function runAgentLoop(tabId) {
   let lastActionKey = null;
   let lastActionOk = false;
+  let lastError = '';
   let repeatCount = 0;
   let cycleKey1 = null;
   let cycleKey2 = null;
@@ -406,9 +501,9 @@ async function runAgentLoop(tabId) {
     }
 
     const actionKey = JSON.stringify(action);
-    if (actionKey === lastActionKey && lastActionOk) {
+    if (actionKey === lastActionKey) {
       repeatCount++;
-      if (repeatCount >= 3) {
+      if (lastActionOk && repeatCount >= 3) {
         notify({
           type: 'agent-message',
           role: 'system',
@@ -416,14 +511,25 @@ async function runAgentLoop(tabId) {
         });
         return;
       }
-      conversation.push({
-        role: 'user',
-        content: `<tool_result name="${action.action}" status="skipped">动作「${describeAction(action)}」上次已执行成功，请勿重复。</tool_result>`
-      });
+      if (!lastActionOk && repeatCount >= 3) {
+        notify({
+          type: 'agent-message',
+          role: 'system',
+          text: `动作「${describeAction(action)}」已连续失败多次（${lastError}），目标可能不存在或无法操作，已停止。`
+        });
+        return;
+      }
+      const msg = lastActionOk
+        ? `动作「${describeAction(action)}」上次已执行成功，请勿重复，直接基于已有信息给出最终答复。`
+        : `动作「${describeAction(action)}」上次执行失败（${lastError}），请不要再原样重试。先用 extract 查看页面实际内容，确认目标名称后换一种方式操作，或直接说明原因结束。`;
+      pushConversation(
+        'user',
+        `<tool_result name="${action.action}" status="skipped">${msg}</tool_result>`
+      );
       notify({
         type: 'agent-message',
         role: 'system',
-        text: `跳过重复动作（${describeAction(action)}），已提醒模型换一种方式继续。`
+        text: `动作（${describeAction(action)}）重复，已提醒模型换一种方式。`
       });
       continue;
     }
@@ -447,24 +553,26 @@ async function runAgentLoop(tabId) {
     notify({ type: 'agent-message', role: 'tool', text: `[动作] ${describeAction(action)}` });
     const result = await executeAction(tabId, action);
     if (!result.ok) {
-      lastActionKey = null;
+      lastActionKey = actionKey;
       lastActionOk = false;
+      lastError = result.error;
       repeatCount = 0;
-      conversation.push({
-        role: 'user',
-        content: `<tool_result name="${action.action}" status="error">${result.error}</tool_result>`
-      });
+      pushConversation(
+        'user',
+        `<tool_result name="${action.action}" status="error">${result.error}</tool_result>`
+      );
       notify({ type: 'agent-message', role: 'system', text: `执行失败：${result.error}` });
     } else if (result.stop) {
       return;
     } else {
       lastActionKey = actionKey;
       lastActionOk = true;
+      lastError = '';
       repeatCount = 0;
-      conversation.push({
-        role: 'user',
-        content: `<tool_result name="${action.action}" status="success">${describeAction(action)}</tool_result>`
-      });
+      pushConversation(
+        'user',
+        `<tool_result name="${action.action}" status="success">${describeAction(action)}</tool_result>`
+      );
     }
   }
   notify({ type: 'agent-message', role: 'system', text: `已达到最大操作次数（${settings.maxIterations}）` });
@@ -685,7 +793,7 @@ async function askModel(state, lastStep) {
     broadcastTokens(totalTokens);
   }
 
-  conversation.push({ role: 'assistant', content: fullContent });
+  pushConversation('assistant', fullContent);
   return { content: fullContent, streamed: visible && fullContent.trim() !== '' };
 }
 
@@ -784,19 +892,24 @@ async function executeAction(tabId, action) {
         : null;
 
     switch (action.action) {
-      case 'goto':
-        await evalInPage(tabId, gotoScript, [action.url]);
-        await sleep(1500);
+      case 'goto': {
+        const url = normalizeUrl(action.url);
+        if (!url) {
+          return { ok: false, error: '无效的 URL，请提供一个以 http(s):// 开头的有效地址。' };
+        }
+        await evalInPage(tabId, gotoScript, [url]);
+        await waitForPageLoad(tabId, 8000);
         return { ok: true };
+      }
 
       case 'back':
         await evalInPage(tabId, backScript, []);
-        await sleep(1200);
+        await waitForPageLoad(tabId, 6000);
         return { ok: true };
 
       case 'reload':
         await evalInPage(tabId, reloadScript, []);
-        await sleep(1200);
+        await waitForPageLoad(tabId, 6000);
         return { ok: true };
 
       case 'click':
@@ -804,9 +917,13 @@ async function executeAction(tabId, action) {
       case 'hover':
       case 'focus':
       case 'scroll_to': {
-        const frames = await evalInAllFrames(tabId, domOpScript, [action.action, target, null]);
-        const done = frames.some((r) => r.result === true);
-        if (!done) {
+        const { found } = await evalInFramesSequential(
+          tabId,
+          domOpScript,
+          [action.action, target, null],
+          (r) => r === true
+        );
+        if (!found) {
           return { ok: false, error: '未找到目标元素' };
         }
         if (action.action === 'click' || action.action === 'dblclick') {
@@ -817,66 +934,72 @@ async function executeAction(tabId, action) {
 
       case 'fill':
         if (target) {
-          const frames = await evalInAllFrames(tabId, domOpScript, [
-            'fill_selector',
-            target,
-            action.value
-          ]);
-          return frames.some((r) => r.result === true)
-            ? { ok: true }
-            : { ok: false, error: '未找到输入框' };
+          const { found: f1 } = await evalInFramesSequential(
+            tabId,
+            domOpScript,
+            ['fill_selector', target, action.value],
+            (r) => r === true
+          );
+          return f1 ? { ok: true } : { ok: false, error: '未找到输入框' };
         }
         {
-          const frames = await evalInAllFrames(tabId, domOpScript, [
-            'fill_focused',
-            null,
-            action.value
-          ]);
-          return frames.some((r) => r.result === true)
-            ? { ok: true }
-            : { ok: false, error: '没有可输入的聚焦元素' };
+          const { found: f2 } = await evalInFramesSequential(
+            tabId,
+            domOpScript,
+            ['fill_focused', null, action.value],
+            (r) => r === true
+          );
+          return f2 ? { ok: true } : { ok: false, error: '没有可输入的聚焦元素' };
         }
 
       case 'type': {
-        const frames = await evalInAllFrames(tabId, domOpScript, ['type', null, action.text]);
-        return frames.some((r) => r.result === true)
-          ? { ok: true }
-          : { ok: false, error: '没有可输入的聚焦元素' };
+        const { found } = await evalInFramesSequential(
+          tabId,
+          domOpScript,
+          ['type', null, action.text],
+          (r) => r === true
+        );
+        return found ? { ok: true } : { ok: false, error: '没有可输入的聚焦元素' };
       }
 
       case 'clear': {
-        const frames = await evalInAllFrames(tabId, domOpScript, ['clear', target, null]);
-        return frames.some((r) => r.result === true)
-          ? { ok: true }
-          : { ok: false, error: '未找到输入框' };
+        const { found } = await evalInFramesSequential(
+          tabId,
+          domOpScript,
+          ['clear', target, null],
+          (r) => r === true
+        );
+        return found ? { ok: true } : { ok: false, error: '未找到输入框' };
       }
 
       case 'select': {
-        const frames = await evalInAllFrames(tabId, domOpScript, [
-          'select',
-          target,
-          { value: action.value, label: action.label }
-        ]);
-        return frames.some((r) => r.result === true)
-          ? { ok: true }
-          : { ok: false, error: '未找到下拉选项' };
+        const { found } = await evalInFramesSequential(
+          tabId,
+          domOpScript,
+          ['select', target, { value: action.value, label: action.label }],
+          (r) => r === true
+        );
+        return found ? { ok: true } : { ok: false, error: '未找到下拉选项' };
       }
 
       case 'check': {
-        const frames = await evalInAllFrames(tabId, domOpScript, [
-          'check',
-          target,
-          { checked: action.checked }
-        ]);
-        return frames.some((r) => r.result === true)
-          ? { ok: true }
-          : { ok: false, error: '未找到复选框' };
+        const { found } = await evalInFramesSequential(
+          tabId,
+          domOpScript,
+          ['check', target, { checked: action.checked }],
+          (r) => r === true
+        );
+        return found ? { ok: true } : { ok: false, error: '未找到复选框' };
       }
 
       case 'submit': {
-        const frames = await evalInAllFrames(tabId, domOpScript, ['submit', target, null]);
-        const done = frames.some((r) => r.result === true);
-        if (!done) {
+        const { found } = await evalInFramesSequential(
+          tabId,
+          domOpScript,
+          ['submit', target, null],
+          (r) => r === true
+        );
+        if (!found) {
           return { ok: false, error: '未找到表单' };
         }
         await sleep(800);
@@ -920,18 +1043,19 @@ async function executeAction(tabId, action) {
           return { ok: false, error: '未找到可提取的内容' };
         }
         const snippet = content.slice(0, 4000);
-        conversation.push({ role: 'user', content: `<tool_result name="extract" status="success">${snippet}</tool_result>` });
+        pushConversation('user', `<tool_result name="extract" status="success">${snippet}</tool_result>`);
         notify({ type: 'agent-message', role: 'tool', text: `[已提取]\n${snippet.slice(0, 500)}` });
         return { ok: true };
       }
 
       case 'ask':
         notify({ type: 'agent-message', role: 'agent', text: action.question });
+        pushConversation('assistant', action.question);
         return { ok: true, stop: true };
 
       case 'done':
         notify({ type: 'agent-message', role: 'agent', text: action.answer });
-        conversation.push({ role: 'assistant', content: `任务完成：${action.answer}` });
+        pushConversation('assistant', `任务完成：${action.answer}`);
         return { ok: true, stop: true };
 
       case 'extract_table': {
@@ -947,7 +1071,7 @@ async function executeAction(tabId, action) {
           .join('\n');
         const summary = `页面共有 ${data.tableCount} 个表格，第 ${action.index ?? 0} 个表格共 ${data.rows.length} 行。\n表格内容：\n${preview}`;
         notify({ type: 'agent-message', role: 'tool', text: `[表格内容]\n${summary}` });
-        conversation.push({ role: 'user', content: `<tool_result name="extract_table" status="success">${summary}</tool_result>` });
+        pushConversation('user', `<tool_result name="extract_table" status="success">${summary}</tool_result>`);
         return { ok: true };
       }
 
@@ -960,7 +1084,7 @@ async function executeAction(tabId, action) {
         }
         const filename = (action.filename || 'table.csv').replace(/\.csv$/i, '') + '.csv';
         const csv = toCsv(data.rows);
-        conversation.push({ role: 'user', content: `<tool_result name="save_table" status="success">已保存文件 ${filename}</tool_result>` });
+        pushConversation('user', `<tool_result name="save_table" status="success">已保存文件 ${filename}</tool_result>`);
         notify({ type: 'download-csv', filename, csv });
         notify({ type: 'agent-message', role: 'tool', text: `已生成文件：${filename}` });
         return { ok: true };
@@ -1006,7 +1130,7 @@ async function executeAction(tabId, action) {
           return { ok: false, error: '图片下载失败（可能存在防盗链）' };
         }
         const filename = `images_${new Date().toISOString().slice(0, 10)}.zip`;
-        conversation.push({ role: 'user', content: `<tool_result name="collect_images" status="success">已打包下载 ${files.length}/${urls.length} 张图片</tool_result>` });
+        pushConversation('user', `<tool_result name="collect_images" status="success">已打包下载 ${files.length}/${urls.length} 张图片</tool_result>`);
         notify({ type: 'download-bundle', filename, files });
         notify({ type: 'agent-message', role: 'tool', text: `已打包下载 ${files.length} 张图片：${filename}` });
         return { ok: true };
@@ -1030,7 +1154,7 @@ async function executeAction(tabId, action) {
         }
         const text = result.text || '(无返回)';
         const snippet = text.slice(0, 4000);
-        conversation.push({ role: 'user', content: `<tool_result name="run_js" status="success">${snippet}</tool_result>` });
+        pushConversation('user', `<tool_result name="run_js" status="success">${snippet}</tool_result>`);
         notify({ type: 'agent-message', role: 'tool', text: `[脚本执行]\n${snippet.slice(0, 500)}` });
         return { ok: true };
       }
@@ -1088,9 +1212,53 @@ function getStateScript(limit) {
   };
 }
 
+// 规范化 goto 目标：补全缺失的协议前缀并校验是否为合法 URL
+function normalizeUrl(raw) {
+  if (!raw) return '';
+  let trimmed = String(raw).trim();
+  if (!trimmed || /\s/.test(trimmed)) return '';
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+    trimmed = 'https://' + trimmed;
+  }
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    return u.href;
+  } catch {
+    return '';
+  }
+}
+
 function gotoScript(url) {
   location.href = url;
   return true;
+}
+
+// 页面是否已加载出实质内容（用于导航后智能等待，避免 SPA 尚未渲染完就被采集为空状态）
+function pageReadyScript() {
+  if (document.readyState === 'loading') {
+    return false;
+  }
+  const text = document.body && document.body.innerText ? document.body.innerText.trim() : '';
+  return text.length >= 30;
+}
+
+// 导航后轮询等待页面就绪，最多等 timeoutMs
+async function waitForPageLoad(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (abortFlag) {
+      return;
+    }
+    try {
+      if (await evalInPage(tabId, pageReadyScript, [])) {
+        return;
+      }
+    } catch {
+      // 页面正在跳转，忽略错误继续轮询
+    }
+    await sleep(300);
+  }
 }
 
 function backScript() {
