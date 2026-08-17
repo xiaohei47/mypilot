@@ -69,6 +69,7 @@ const SYSTEM_PROMPT = `你是一个网页自动化 AI Agent，通过操作浏览
 - 如果可交互元素列表中找不到用户要操作的目标，说明该目标当前不在页面上或名称不对：不要原样重复操作，先 extract 查看页面实际内容，再决定是换个名称还是说明找不到。
 - 一次只执行一步操作，等待下一页状态后再继续。
 - 任务模糊时使用 ask 询问用户，而不是猜测。
+- 当用户明确表示不需要操作网页（如"聊天""闲聊""不做网页操作"）时，忽略页面状态，直接用自然语言回复，不要输出任何 JSON 动作，也不要询问关于网页内容的问题。
 - 任务完成时，直接用自然语言输出最终答复（不要输出 JSON）。
 - 无法推进任务时，也用自然语言说明原因并结束。
 - 当用户要求"整理/输出/导出表格文件"时：先 extract_table 查看内容，再用 save_table 保存为文件，最后用自然语言总结。
@@ -464,11 +465,12 @@ async function runAgentLoop(tabId) {
       return;
     }
 
-    const state = await collectState(tabId);
+    const chatOnly = isChatOnly();
+    const state = chatOnly ? '' : await collectState(tabId);
     let model;
     notify({ type: 'agent-thinking', on: true });
     try {
-      model = await askModel(state, i === settings.maxIterations - 1);
+      model = await askModel(state, i === settings.maxIterations - 1, chatOnly);
     } finally {
       notify({ type: 'agent-thinking', on: false });
     }
@@ -550,7 +552,9 @@ async function runAgentLoop(tabId) {
     cycleKey2 = cycleKey1;
     cycleKey1 = actionKey;
 
-    notify({ type: 'agent-message', role: 'tool', text: `[动作] ${describeAction(action)}` });
+    if (action.action !== 'ask') {
+      notify({ type: 'agent-message', role: 'tool', text: `[动作] ${describeAction(action)}` });
+    }
     const result = await executeAction(tabId, action);
     if (!result.ok) {
       lastActionKey = actionKey;
@@ -578,6 +582,20 @@ async function runAgentLoop(tabId) {
   notify({ type: 'agent-message', role: 'system', text: `已达到最大操作次数（${settings.maxIterations}）` });
 }
 
+// 检测用户最近指令是否纯聊天（不涉及网页操作），用于跳过页面状态采集。
+// 只参考最近一条用户消息（排除 <tool_result> 系统反馈），命中"聊天/不操作网页"类信号即返回 true。
+function isChatOnly() {
+  for (let i = conversation.length - 1; i >= 0; i--) {
+    const m = conversation[i];
+    if (m.role === 'user' && !String(m.content).startsWith('<tool_result')) {
+      return /聊天|聊聊天|聊聊|聊一聊|闲聊|吹水|讨论|谈谈|问答|答疑|不操作网页|不做网页操作|别操作网页|不用操作网页|不需要操作网页|不.*操作(网页|网站)/.test(
+        String(m.content)
+      );
+    }
+  }
+  return false;
+}
+
 async function collectState(tabId) {
   try {
     const frames = await evalInAllFrames(tabId, getStateScript, [settings.maxStateChars]);
@@ -600,13 +618,15 @@ async function collectState(tabId) {
   }
 }
 
-async function askModel(state, lastStep) {
+async function askModel(state, lastStep, chatOnly) {
   if (conversation.length > 40) {
     conversation = conversation.slice(-40);
   }
   const statePrompt = lastStep
     ? `--- 页面状态 ---\n${state}\n\n这是最后一步：不要再执行任何动作，请直接基于已有信息给出最终答复。`
-    : `--- 页面状态 ---\n${state}\n\n请根据页面状态决定下一步操作。`;
+    : chatOnly
+      ? `用户当前不需要操作网页（纯聊天/问答/讨论）。请忽略页面内容，直接以自然语言回复，不要输出任何 JSON 动作，也不要询问关于网页内容的问题。`
+      : `--- 页面状态 ---\n${state}\n\n请根据页面状态决定下一步操作。`;
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     ...conversation,
@@ -615,6 +635,7 @@ async function askModel(state, lastStep) {
 
   let fullContent = '';
   let visible = true;
+  let shownLen = 0;
   let thinkingContent = '';
   let thinkingStarted = false;
   const promptTokens = estimateTokens(JSON.stringify(messages));
@@ -658,12 +679,23 @@ async function askModel(state, lastStep) {
       lastTokenBroadcast = now;
       broadcastTokens(totalTokens + promptTokens + completionTokens);
     }
-    const trimmed = fullContent.trimStart();
-    if (trimmed.startsWith('{') || trimmed.startsWith('```')) {
-      visible = false;
-    } else if (visible) {
-      notify({ type: 'agent-stream', delta });
+    if (!visible) {
+      return;
     }
+    // 一旦出现 JSON 动作区（``` 开头的 code-fence 或第一个 {）就停止流式显示，
+    // 只把动作区之前的内容（若有）显示出来，避免 JSON 原文泄露到界面上。
+    const t = fullContent.trimStart();
+    const start = t.startsWith('```') ? 0 : t.search(/\{/);
+    if (start === -1) {
+      notify({ type: 'agent-stream', delta });
+      shownLen = t.length;
+      return;
+    }
+    const before = t.slice(shownLen, start);
+    if (before) {
+      notify({ type: 'agent-stream', delta: before });
+    }
+    visible = false;
   };
 
   const readStream = async (response, onEvent) => {
@@ -768,9 +800,12 @@ async function askModel(state, lastStep) {
             endThinking();
             fullContent = content;
             completionTokens += estimateTokens(content);
-            const trimmed = content.trimStart();
-            if (!trimmed.startsWith('{') && !trimmed.startsWith('```')) {
+            const t = content.trimStart();
+            const start = t.startsWith('```') ? 0 : t.search(/\{/);
+            if (start === -1) {
               notify({ type: 'agent-stream', delta: content });
+            } else if (start > 0) {
+              notify({ type: 'agent-stream', delta: t.slice(0, start) });
             }
           }
         } catch {
@@ -797,8 +832,10 @@ async function askModel(state, lastStep) {
   return { content: fullContent, streamed: visible && fullContent.trim() !== '' };
 }
 
+// 最终答复判定与 parseAction 保持一致：能解析出动作（含 code-fence 包裹/尾部混入 JSON）才算动作，
+// 否则一律视为最终答复。避免 ```json 包裹的 JSON 被误当答复、自然语言后跟 JSON 被吞掉。
 function isFinalResponse(model) {
-  return !model.content.trim().startsWith('{');
+  return !parseAction(model.content);
 }
 
 function parseAction(text) {
@@ -1050,7 +1087,6 @@ async function executeAction(tabId, action) {
 
       case 'ask':
         notify({ type: 'agent-message', role: 'agent', text: action.question });
-        pushConversation('assistant', action.question);
         return { ok: true, stop: true };
 
       case 'done':
